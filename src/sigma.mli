@@ -51,3 +51,7 @@ val pattern_sigma :
 val curry_hyp :
   Evd.evar_map ->
   Term.constr -> Term.types -> (Term.constr * Term.types) option
+val generalize_sigma :
+  Context.named_declaration ->
+    Environ.env -> Evd.evar_map -> Term.types -> 
+      unit Proofview.tactic

@@ -95,6 +95,17 @@ TACTIC EXTEND curry
       | None -> tclFAIL 0 (str"No currying to do in" ++ pr_id id) gl) ]
 END
 
+TACTIC EXTEND generalize_sigma
+[ "generalize" "sigma" hyp(id) ] -> [
+  Proofview.Goal.enter (fun gl ->
+    let gl = Proofview.Goal.assume gl in
+    let concl = Tacmach.New.pf_concl gl in
+    let env = Proofview.Goal.env gl in
+    let sigma = Proofview.Goal.sigma gl in
+    let decl = Tacmach.New.pf_get_hyp id gl in
+      Sigma.generalize_sigma decl env sigma concl) ]
+END
+
 (* TACTIC EXTEND pattern_tele *)
 (* [ "pattern_tele" constr(c) ident(hyp) ] -> [ fun gl -> *)
 (*   let settac = letin_tac None (Name hyp) c None onConcl in *)
