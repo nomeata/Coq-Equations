@@ -188,7 +188,6 @@ let declare_sig_of_ind env ind =
   let idx, pred, _, _, _, valsig, _ = 
     sigmaize (push_rel_context pars env) evd parapp 
   in
-  msg_info (Printer.pr_constr valsig);
   let sigma = !evd in
   let indid = ind_name ind in
   let simpl = Tacred.simpl env sigma in
