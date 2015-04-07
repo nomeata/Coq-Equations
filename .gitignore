@@ -2,6 +2,7 @@
 *.vo
 Makefile
 *.bak
+*.swp
 *.cm*
 *.o
 *.glob

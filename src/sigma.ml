@@ -188,6 +188,7 @@ let declare_sig_of_ind env ind =
   let idx, pred, _, _, _, valsig, _ = 
     sigmaize (push_rel_context pars env) evd parapp 
   in
+  msg_info (Printer.pr_constr valsig);
   let sigma = !evd in
   let indid = ind_name ind in
   let simpl = Tacred.simpl env sigma in
@@ -290,72 +291,29 @@ let generalize_sigma (id, b, c as decl) env evm concl =
   let mib, oib = Global.lookup_inductive ind in
   let ctx = oib.mind_arity_ctxt in
   let lenargs = length ctx - mib.mind_nparams_rec in
-  let indargs, _ = chop lenargs ctx in
-  let args, pars = chop lenargs (Array.to_list args) in
-  let parapp = mkApp(f, Array.of_list pars) in
+  let indargs, indpars = chop lenargs ctx in
+  let pars, args = chop mib.mind_nparams_rec (Array.to_list args) in
+  let parapp = mkApp (mkInd ind, extended_rel_vect 0 indpars) in
   let newargs = Array.init lenargs (fun i -> mkRel (lenargs - i)) in
-  let fullapp = mkApp (parapp, newargs) in
+  let fullapp = mkApp (mkApp (f, Array.of_list pars), newargs) in
   let vbinder = (Name (add_suffix (ind_name ind) "_var")), None, fullapp in
   let ctx = vbinder :: indargs in
   let evm = ref evm in
-  let _, _, _, _, _, valsig, _ = sigmaize env evm parapp in
+  let _, _, _, _, _, valsig, _ = sigmaize (push_rel_context indpars env) evm parapp in
   let left = valsig in
   let sig_pack = it_mkLambda_or_LetIn valsig ctx in
-  let right = mkApp (sig_pack, Array.of_list (args @ [mkVar id])) in
+  let rightargs = Array.of_list (args @ [mkVar id]) in
+  let right = mkApp (lift (lenargs + 1) sig_pack, rightargs) in
   let ty = Retyping.get_type_of env !evm right in
   let eq = mkEq evm ty left right in
   let evm = !evm in
   let concl = mkProd_or_LetIn (Anonymous, None, eq) concl in
   let concl = it_mkProd_or_LetIn concl ctx in
+  let ctxpars = map2 (fun (n, _, t) c -> (n, Some c, t)) indpars (rev pars) in
+  let concl = it_mkLambda_or_LetIn concl ctxpars in
+  let concl = Tacred.simpl env evm concl in
   let hid = Tactics.fresh_id_in_env [] (Id.of_string "H") env in
     Tacticals.New.tclTHENS
     (Tactics.assert_before (Name hid) concl)
     [Tacticals.New.tclDO lenargs Tactics.intro;
     Tacticals.New.tclTHEN (Tactics.eapply (mkVar hid)) Tactics.reflexivity]
-
-
-(*
-  let avoid = ref [] in
-  let fresh () =
-    let res = Tactics.fresh_id_in_env !avoid (Id.of_string "todo") env in
-      avoid := res :: !avoid; res
-  in
-  let decls, newargs = Array.fold_left (fun (decls, newargs) arg ->
-    let name = fresh ()  in
-    let tyarg = Typing.type_of env evm arg in
-      (Name name, None, tyarg) :: decls, (mkVar name) :: newargs
-    ) ([], []) args
-  in
-  let newargs = rev newargs in
-  let newargs = Array.init nbargs (fun i -> mkRel (nbargs - i)) in
-  let decl = (Name (fresh ()), None, mkApp (f, newargs)) in
-  let concl = mkProd_or_LetIn decl concl in
-  let concl = it_mkProd_or_LetIn concl decls in
-  let evm = ref evm in
-  let argtyp, pred, indices, indexproj, valproj, valsig, tysig = sigmaize env
-  evm f in
-  let evm = !evm in
-    msg_info (Printer.pr_constr_env env evm argtyp);
-    msg_info (Printer.pr_constr_env env evm pred);
-    msg_info (Printer.pr_constr_env env evm indexproj);
-    msg_info (Printer.pr_constr_env env evm valproj);
-    msg_info (Printer.pr_constr_env env evm valsig);
-    msg_info (Printer.pr_constr_env env evm tysig);
-    msg_info (Printer.pr_constr_env env evm concl);
-    Proofview.V82.tactic tclIDTAC
-*)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
