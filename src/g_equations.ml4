@@ -83,9 +83,11 @@ TACTIC EXTEND pattern_sigma
     let term = Option.get (Util.pi2 decl) in
       Sigma.pattern_sigma term id env sigma) ]
 END
+
+open Tacmach
+
 TACTIC EXTEND curry
 [ "curry" hyp(id) ] -> [ 
-  let open Tacmach in
   Proofview.V82.tactic 
     (fun gl ->
       match Sigma.curry_hyp (project gl) (mkVar id) (pf_get_hyp_typ gl id) with
@@ -203,14 +205,14 @@ open Syntax
 ARGUMENT EXTEND equation_user_option
 TYPED AS equation_user_option
 PRINTED BY pr_r_equation_user_option
-| [ "noind" ] -> [ OInd, false ]
-| [ "ind" ] -> [ OInd, true ]
-| [ "struct" ] -> [ ORec, true ]
-| [ "nostruct" ] -> [ ORec, false ]
-| [ "comp" ] -> [ OComp, true ]
-| [ "nocomp" ] -> [ OComp, false ]
-| [ "eqns" ] -> [ OEquations, true ]
-| [ "noeqns" ] -> [ OEquations, false ]
+| [ "noind" ] -> [ OInd false ]
+| [ "ind" ] -> [ OInd true ]
+| [ "struct" ident(i) ] -> [ ORec (Some (loc, i)) ]
+| [ "nostruct" ] -> [ ORec None ]
+| [ "comp" ] -> [ OComp true ]
+| [ "nocomp" ] -> [ OComp false ]
+| [ "eqns" ] -> [ OEquations true ]
+| [ "noeqns" ] -> [ OEquations false ]
 END
 
 ARGUMENT EXTEND equation_options
