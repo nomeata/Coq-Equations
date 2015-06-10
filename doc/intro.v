@@ -6,35 +6,10 @@
    module.
    *)
 
-Require Import Equations.
+From Equations Require Import Equations.
 
 (* begin hide *)
 Check @eq.
-Ltac funind c Hcall ::= 
-  match c with
-    appcontext C [ ?f ] => 
-      let x := constr:(fun_ind_prf (f:=f)) in
-        (let prf := eval simpl in x in
-         let p := context C [ prf ] in
-         let prf := fresh in
-         let call := fresh in
-           assert(prf:=p) ;
-           (* Abstract the call *)
-           set(call:=c) in *; generalize (refl_equal : call = c); clearbody call ; intro Hcall ;
-           (* Now do dependent elimination and simplifications *)
-           dependent induction prf ; simplify_IH_hyps)
-           (* Use the simplifiers for the constant to get a nicer goal. *)
-           (* try on_last_hyp ltac:(fun id => simpc f in id ; noconf id)) *)
-        || fail 1 "Internal error in funind"
-  end || fail "Maybe you didn't declare the functional induction principle for" c.
-
-Ltac funelim c :=
-  match c with
-    appcontext C [ ?f ] => 
-      let x := constr:(fun_elim (f:=f)) in
-        (let prf := eval simpl in x in
-          dependent pattern c ; apply prf)
-  end.
 Require Import Bvector.
 
 (* Derive DependentElimination for nat bool option sum prod list vector. *)
