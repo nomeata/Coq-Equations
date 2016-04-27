@@ -436,3 +436,49 @@ TACTIC EXTEND is_secvar
     | Var id when Termops.is_section_variable id -> Proofview.tclUNIT ()
     | _ -> Tacticals.New.tclFAIL 0 (str "Not a section variable or hypothesis") ]
 END
+
+
+(* Simplify *)
+
+type simplification_rules_argtype = Simplify.simplification_rules Genarg.uniform_genarg_type
+
+let wit_simplification_rules : simplification_rules_argtype =
+  Genarg.create_arg None "simplification_rules"
+
+let pr_raw_simplification_rules _ _ _ l = mt ()
+let pr_glob_simplification_rules _ _ _ l = mt ()
+let pr_simplification_rules _ _ _ l = mt ()
+
+let simplification_rules : Simplify.simplification_rules Gram.entry =
+  Pcoq.create_generic_entry "simplification_rules"
+    (Genarg.rawwit wit_simplification_rules)
+
+let _ = Pptactic.declare_extra_genarg_pprule wit_simplification_rules
+  pr_raw_simplification_rules pr_glob_simplification_rules pr_simplification_rules
+
+GEXTEND Gram
+  GLOBAL: simplification_rules;
+
+  simplification_rules:
+    [ [ l = LIST1 simplification_rule -> l ] ]
+  ;
+
+  direction:
+    [ [ "->" -> Some Simplify.Left
+      | "<-" -> Some Simplify.Right
+      | "<->" -> None
+    ] ];
+
+  simplification_rule:
+    [ [ "-" -> Some Simplify.Deletion
+      | dir = direction -> Some (Simplify.Solution dir)
+      | "?" -> None
+    ] ];
+END
+
+TACTIC EXTEND simplify
+| [ "simplify" simplification_rules(l) ] ->
+  [ Simplify.simplify_tac l ]
+| [ "simplify" ] ->
+  [ Simplify.simplify_tac [] ]
+END
