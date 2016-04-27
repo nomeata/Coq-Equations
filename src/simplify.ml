@@ -121,8 +121,9 @@ let simplify_tac (rules : simplification_rules) : unit Proofview.tactic =
     let env = Environ.reset_context (Proofview.Goal.env gl) in
     let evd = Proofview.Goal.sigma gl in
     let hyps = Proofview.Goal.hyps gl in
-    let ctx, _ = Covering.rel_of_named_context hyps in
-    let ty = Proofview.Goal.concl gl in
+    let ctx, subst = Covering.rel_of_named_context hyps in
+    let concl = Proofview.Goal.concl gl in
+    let ty = Vars.subst_vars subst concl in
     let (ctx, ty), term = simplify rules env evd (ctx, ty) in
       Proofview.Refine.refine (fun evd ->
         let evd, c = let env = Environ.push_rel_context ctx env in
