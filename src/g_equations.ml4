@@ -442,38 +442,48 @@ END
 
 type simplification_rules_argtype = Simplify.simplification_rules Genarg.uniform_genarg_type
 
-let wit_simplification_rules : simplification_rules_argtype =
-  Genarg.create_arg None "simplification_rules"
+let wit_g_simplification_rules : simplification_rules_argtype =
+  Genarg.create_arg None "g_simplification_rules"
 
-let pr_raw_simplification_rules _ _ _ l = mt ()
-let pr_glob_simplification_rules _ _ _ l = mt ()
-let pr_simplification_rules _ _ _ l = mt ()
+let pr_raw_g_simplification_rules _ _ _ = Simplify.pr_simplification_rules
+let pr_glob_g_simplification_rules _ _ _ = Simplify.pr_simplification_rules
+let pr_g_simplification_rules _ _ _ = Simplify.pr_simplification_rules
 
-let simplification_rules : Simplify.simplification_rules Gram.entry =
-  Pcoq.create_generic_entry "simplification_rules"
-    (Genarg.rawwit wit_simplification_rules)
+let g_simplification_rules : Simplify.simplification_rules Gram.entry =
+  Pcoq.create_generic_entry "g_simplification_rules"
+    (Genarg.rawwit wit_g_simplification_rules)
 
-let _ = Pptactic.declare_extra_genarg_pprule wit_simplification_rules
-  pr_raw_simplification_rules pr_glob_simplification_rules pr_simplification_rules
+let _ = Pptactic.declare_extra_genarg_pprule wit_g_simplification_rules
+  pr_raw_g_simplification_rules pr_glob_g_simplification_rules pr_g_simplification_rules
 
 GEXTEND Gram
-  GLOBAL: simplification_rules;
+  GLOBAL: g_simplification_rules;
 
-  simplification_rules:
+  g_simplification_rules:
     [ [ l = LIST1 simplification_rule -> l ] ]
   ;
-
-  direction:
-    [ [ "->" -> Some Simplify.Left
-      | "<-" -> Some Simplify.Right
-      | "<->" -> None
-    ] ];
 
   simplification_rule:
     [ [ "-" -> Some Simplify.Deletion
       | dir = direction -> Some (Simplify.Solution dir)
       | "?" -> None
     ] ];
+
+  direction:
+    [ [ "->" -> Some Simplify.Left
+      | "<-" -> Some Simplify.Right
+      | "<->" -> None
+    ] ];
+END
+
+(* We need these alias due to the limitations of parsing macros. *)
+type simplification_rules = Simplify.simplification_rules
+let pr_simplification_rules _ _ _ = Simplify.pr_simplification_rules
+
+ARGUMENT EXTEND simplification_rules
+TYPED AS simplification_rules
+PRINTED BY pr_simplification_rules
+  | [ g_simplification_rules(l) ] -> [ l ]
 END
 
 TACTIC EXTEND simplify

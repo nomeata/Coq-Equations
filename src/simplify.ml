@@ -121,12 +121,35 @@ let simplify_tac (rules : simplification_rules) : unit Proofview.tactic =
     let env = Environ.reset_context (Proofview.Goal.env gl) in
     let evd = Proofview.Goal.sigma gl in
     let hyps = Proofview.Goal.hyps gl in
+    (* We want to work in a [rel_context], not a [named_context]. *)
     let ctx, subst = Covering.rel_of_named_context hyps in
     let concl = Proofview.Goal.concl gl in
+    (* We also need to convert the goal for it to be well-typed in
+     * the [rel_context]. *)
     let ty = Vars.subst_vars subst concl in
-    let (ctx, ty), term = simplify rules env evd (ctx, ty) in
+    (* [ty'] is the expected type of the hole in the term, under the
+     * context [ctx']. *)
+    let (ctx', ty'), term = simplify rules env evd (ctx, ty) in
       Proofview.Refine.refine (fun evd ->
-        let evd, c = let env = Environ.push_rel_context ctx env in
-          Evarutil.new_evar ~principal:true env evd ty
+        let evd, c = let env = Environ.push_rel_context ctx' env in
+          Evarutil.new_evar ~principal:true env evd ty'
         in term env evd c)
   end
+
+
+(* Printing functions. *)
+
+let pr_simplification_step : simplification_step -> Pp.std_ppcmds = function
+  | Deletion -> Pp.str "-"
+  | Solution (Some Left) -> Pp.str "->"
+  | Solution (Some Right) -> Pp.str "<-"
+  | Solution None -> Pp.str "<->"
+  | NoConfusion -> Pp.str "NoConfusion"
+  | NoCycle -> Pp.str "NoCycle"
+
+let pr_simplification_rule : simplification_step option -> Pp.std_ppcmds = function
+  | None -> Pp.str "?"
+  | Some step -> pr_simplification_step step
+
+let pr_simplification_rules : simplification_rules -> Pp.std_ppcmds =
+  Pp.prlist_with_sep Pp.spc pr_simplification_rule
