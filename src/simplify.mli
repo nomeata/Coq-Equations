@@ -2,7 +2,7 @@
 type direction = Left | Right
 
 type simplification_step =
-    Deletion
+    Deletion of bool (* Force the use of K? *)
   | Solution of direction option (* None = infer it *)
   | NoConfusion
   | NoCycle
@@ -12,14 +12,13 @@ type simplification_rules = (Loc.t * simplification_step option) list
 
 type goal = Context.rel_context * Term.types
 
-type open_term =
-  Environ.env -> Evd.evar_map -> Term.constr -> Evd.evar_map * Term.constr
+type open_term = Term.constr -> Term.constr
 type open_term_with_context = goal * open_term
 
 exception CannotSimplify of Pp.std_ppcmds
 
 type simplification_fun =
-  Environ.env -> Evd.evar_map -> goal -> open_term_with_context
+  Environ.env -> Evd.evar_map ref -> goal -> open_term_with_context
 
 (* Auxiliary functions. *)
 
@@ -29,7 +28,8 @@ val strengthen :
   Context.rel_context -> int -> Term.constr ->
   Covering.context_map * Covering.context_map
 
-val safe_term : open_term_with_context -> open_term_with_context
+val safe_term : Environ.env -> Evd.evar_map ref ->
+  open_term_with_context -> open_term_with_context
 val compose_term : open_term_with_context -> open_term_with_context ->
   open_term_with_context
 val safe_fun : simplification_fun -> simplification_fun
@@ -43,7 +43,7 @@ val compose_fun : simplification_fun -> simplification_fun -> simplification_fun
 (* For instance, a goal such as [(p; x) = (q; y) -> P] has to be changed
  * to [forall (e : p = q), eq_rect ... x e = y -> P] beforehand. *)
 
-val deletion : simplification_fun
+val deletion : force:bool -> simplification_fun
 val solution : dir:direction -> simplification_fun
 val noConfusion : simplification_fun
 val noCycle : simplification_fun
@@ -52,7 +52,7 @@ val identity : simplification_fun
 val execute_step : simplification_step -> simplification_fun
 
 val infer_step :
-  isDir:bool -> Environ.env -> Evd.evar_map -> goal -> simplification_step
+  isDir:bool -> Environ.env -> Evd.evar_map ref -> goal -> simplification_step
 
 val simplify : simplification_rules -> simplification_fun
 
