@@ -1,3 +1,5 @@
+open Pp
+
 (* ========== Coq references ========= *)
 (* This section should change a lot when we approach an actual solution. *)
 
@@ -8,10 +10,12 @@ module type COQREFS =
   sig
     val eq : constr_gen
     val eq_refl : constr_gen
+    val eq_dec : constr_gen
     val simpl_sigma1 : constr_gen
     val simpl_sigma1_dep : constr_gen
     val simpl_sigma1_dep_dep : constr_gen
     val simpl_K : constr_gen
+    val simpl_K_dec : constr_gen
   end
 
 module CoqRefs : COQREFS = struct
@@ -26,6 +30,7 @@ module CoqRefs : COQREFS = struct
 
   let eq = gen_from_ref (Lazy.from_fun Coqlib.build_coq_eq)
   let eq_refl = gen_from_ref (Lazy.from_fun Coqlib.build_coq_eq_refl)
+  let eq_dec = load_ref ["Equations"; "EqDec"] "EqDec"
   let simpl_sigma1 = load_ref ["Equations"; "DepElim"]
     "eq_simplification_sigma1"
   let simpl_sigma1_dep = load_ref ["Equations"; "DepElim"]
@@ -34,6 +39,8 @@ module CoqRefs : COQREFS = struct
     "eq_simplification_sigma1_dep_dep"
   let simpl_K = load_ref ["Equations"; "DepElim"]
     "simplification_K"
+  let simpl_K_dec = load_ref ["Equations"; "DepElim"]
+    "simplification_K_dec"
 end
 
 (* ========== Simplification ========== *)
@@ -103,28 +110,42 @@ let deletion ~(force:bool) (env : Environ.env) (evd : Evd.evar_map ref)
     let name, ty1, ty2 = Term.destProd ty in
       let ind, args = Term.decompose_appvect ty1 in
       if not (Constr.equal ind (CoqRefs.eq evd)) then
-        raise (CannotSimplify (Pp.str
-          "[deletion] First hypothesis in the goal is not an equality."))
+        raise (CannotSimplify (str
+          "[deletion] The first hypothesis in the goal is not an equality."))
       else
         if Vars.noccurn 1 ty2 then
           (* The goal does not depend on the equality, we can just eliminate it. *)
           (ctx, Vars.lift (-1) ty2), fun c ->
             Constr.mkLambda (Names.Anonymous, ty1, Vars.lift 1 c)
-        else if not force then
-          raise (CannotSimplify (Pp.str
-            "[deletion] Cannot simplify without K."))
         else
           let tA = args.(0) in
           let tx = args.(1) in
           let tB = Constr.mkLambda (name, ty1, ty2) in
           let teq_refl = Constr.mkApp (CoqRefs.eq_refl evd, [| tA; tx |]) in
           let ty = Vars.subst1 teq_refl ty2 in
-          let tsimpl_K = CoqRefs.simpl_K evd in
-            (ctx, ty), fun c ->
+          (ctx, ty), if force then
+            (* The user wants to use K directly. *)
+            let tsimpl_K = CoqRefs.simpl_K evd in
+            fun c ->
               Constr.mkApp (tsimpl_K, [| tA; tx; tB; c |])
+          else
+            (* We will try to find an instance of K for the type [A]. *)
+            let tsimpl_K_dec = CoqRefs.simpl_K_dec evd in
+            let eqdec_ty = Constr.mkApp (CoqRefs.eq_dec evd, [| tA |]) in
+            let tdec =
+              let env = Environ.push_rel_context ctx env in
+              try
+                Evarutil.evd_comb1
+                  (Typeclasses.resolve_one_typeclass env) evd eqdec_ty
+              with Not_found ->
+                raise (CannotSimplify (str
+                  "[deletion] Cannot simplify without K on type " ++
+                  Printer.pr_constr_env env !evd tA))
+            in fun c ->
+              Constr.mkApp (tsimpl_K_dec, [| tA; tdec; tx; tB; c |])
   with
-  | Term.DestKO -> raise (CannotSimplify (Pp.str
-    "[deletion] The goal is not a product."))
+  | Term.DestKO -> raise (CannotSimplify (str
+      "[deletion] The goal is not a product."))
 
 let solution ~dir:direction (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : open_term_with_context =
@@ -209,18 +230,18 @@ let simplify_tac (rules : simplification_rules) : unit Proofview.tactic =
 (* Printing functions. *)
 
 let pr_simplification_step : simplification_step -> Pp.std_ppcmds = function
-  | Deletion false -> Pp.str "-"
-  | Deletion true -> Pp.str "-!"
-  | Solution (Some Left) -> Pp.str "->"
-  | Solution (Some Right) -> Pp.str "<-"
-  | Solution None -> Pp.str "<->"
-  | NoConfusion -> Pp.str "NoConfusion"
-  | NoCycle -> Pp.str "NoCycle"
+  | Deletion false -> str "-"
+  | Deletion true -> str "-!"
+  | Solution (Some Left) -> str "->"
+  | Solution (Some Right) -> str "<-"
+  | Solution None -> str "<->"
+  | NoConfusion -> str "NoConfusion"
+  | NoCycle -> str "NoCycle"
 
 let pr_simplification_rule ((_, rule) : Loc.t * simplification_step option) :
   Pp.std_ppcmds = match rule with
-  | None -> Pp.str "?"
+  | None -> str "?"
   | Some step -> pr_simplification_step step
 
 let pr_simplification_rules : simplification_rules -> Pp.std_ppcmds =
-  Pp.prlist_with_sep Pp.spc pr_simplification_rule
+  prlist_with_sep spc pr_simplification_rule
