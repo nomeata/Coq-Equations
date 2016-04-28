@@ -460,7 +460,11 @@ GEXTEND Gram
   GLOBAL: g_simplification_rules;
 
   g_simplification_rules:
-    [ [ l = LIST1 simplification_rule -> l ] ]
+    [ [ l = LIST1 simplification_rule_located -> l ] ]
+  ;
+
+  simplification_rule_located:
+    [ [ r = simplification_rule -> (!@loc, r) ] ]
   ;
 
   simplification_rule:

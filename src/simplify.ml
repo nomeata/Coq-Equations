@@ -8,7 +8,7 @@ type simplification_step =
   | NoCycle
 
 (* None = infer it. *)
-type simplification_rules = simplification_step option list
+type simplification_rules = (Loc.t * simplification_step option) list
 
 type goal = Context.rel_context * Term.types
 
@@ -62,12 +62,22 @@ let compose_fun (f : simplification_fun) (g : simplification_fun)
 
 let deletion (env : Environ.env) (evd : Evd.evar_map)
   ((ctx, ty) : goal) : open_term_with_context =
-  failwith "[deletion] is not implemented!"
-  (*
-  let _, ty1, ty2 = Term.destProd ty in
-    (ctx, Vars.lift (-1) ty2), fun env evd c ->
-      evd, Constr.mkLambda (Names.Anonymous, ty1, Vars.lift 1 c)
-  *)
+  try
+    let name, ty1, ty2 = Term.destProd ty in
+      let ind, args = Term.decompose_appvect ty1 in
+      if false then
+        raise (CannotSimplify (Pp.str
+          "[deletion] First hypothesis in the goal is not an equality."))
+      else
+        if Vars.noccurn 1 ty2 then
+          (* The goal does not depend on the equality, we can just eliminate it. *)
+          (ctx, Vars.lift (-1) ty2), fun env evd c ->
+            evd, Constr.mkLambda (Names.Anonymous, ty1, Vars.lift 1 c)
+        else
+          failwith "[deletion] is not implemented!"
+  with
+  | Term.DestKO -> raise (CannotSimplify (Pp.str
+    "[deletion] The goal is not a product."))
 
 let solution ~dir:direction (env : Environ.env) (evd : Evd.evar_map)
   ((ctx, ty) : goal) : open_term_with_context =
@@ -85,6 +95,12 @@ let identity (env : Environ.env) (evd : Evd.evar_map)
   (gl : goal) : open_term_with_context =
   gl, fun env evd c -> evd, c
 
+
+
+let deletion = safe_fun deletion
+let solution ~dir = safe_fun (solution ~dir)
+let noConfusion = safe_fun noConfusion
+let noCycle = safe_fun noCycle
 let identity = safe_fun identity
 
 
@@ -96,13 +112,11 @@ let execute_step : simplification_step -> simplification_fun = function
   (* We assume the direction has been inferred at this point. *)
   | Solution None -> assert false
 
-let execute_step step = safe_fun (execute_step step)
-
 let infer_step ~isDir:bool (env : Environ.env) (evd : Evd.evar_map)
   ((ctx, ty) : goal) : simplification_step =
   failwith "[infer_step] is not implemented!"
 
-let simplify_one : simplification_step option -> simplification_fun = function
+let simplify_one_aux : simplification_step option -> simplification_fun = function
   | None -> fun env evd gl ->
       let step = infer_step ~isDir:false env evd gl in
         execute_step step env evd gl
@@ -111,8 +125,14 @@ let simplify_one : simplification_step option -> simplification_fun = function
         execute_step step env evd gl
   | Some step -> execute_step step
 
+let simplify_one ((loc, rule) : Loc.t * simplification_step option) :
+  simplification_fun = fun env evd gl ->
+    try simplify_one_aux rule env evd gl
+    with CannotSimplify err ->
+      Errors.user_err_loc (loc, "Equations.Simplify", err)
+
 let simplify (rules : simplification_rules) : simplification_fun =
-  let funs = List.map simplify_one rules in
+  let funs = List.rev_map simplify_one rules in
     List.fold_left compose_fun identity funs
 
 let simplify_tac (rules : simplification_rules) : unit Proofview.tactic =
@@ -147,7 +167,8 @@ let pr_simplification_step : simplification_step -> Pp.std_ppcmds = function
   | NoConfusion -> Pp.str "NoConfusion"
   | NoCycle -> Pp.str "NoCycle"
 
-let pr_simplification_rule : simplification_step option -> Pp.std_ppcmds = function
+let pr_simplification_rule ((_, rule) : Loc.t * simplification_step option) :
+  Pp.std_ppcmds = match rule with
   | None -> Pp.str "?"
   | Some step -> pr_simplification_step step
 

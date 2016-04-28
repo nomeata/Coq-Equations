@@ -8,7 +8,7 @@ type simplification_step =
   | NoCycle
 
 (* None = infer it. *)
-type simplification_rules = simplification_step option list
+type simplification_rules = (Loc.t * simplification_step option) list
 
 type goal = Context.rel_context * Term.types
 
@@ -38,6 +38,10 @@ val compose_fun : simplification_fun -> simplification_fun -> simplification_fun
 (* Simplification functions to handle each step. *)
 (* Any of these can throw a CannotSimplify exception which explains why the
  * rule cannot apply. *)
+(* It is assumed that the head of the goal should be a simple equality that
+ * the function has to simplify. *)
+(* For instance, a goal such as [(p; x) = (q; y) -> P] has to be changed
+ * to [forall (e : p = q), eq_rect ... x e = y -> P] beforehand. *)
 
 val deletion : simplification_fun
 val solution : dir:direction -> simplification_fun
