@@ -64,6 +64,9 @@ type open_term_with_context = goal * open_term
 
 exception CannotSimplify of Pp.std_ppcmds
 
+type pre_simplification_fun =
+  Environ.env -> Evd.evar_map ref -> goal -> Context.rel_context * open_term
+
 type simplification_fun =
   Environ.env -> Evd.evar_map ref -> goal -> open_term_with_context
 
@@ -72,6 +75,23 @@ type simplification_fun =
 let strengthen (env : Environ.env) (evd : Evd.evar_map) (ctx : Context.rel_context)
   (x : int) (t : Term.constr) : Covering.context_map * Covering.context_map =
   failwith "[strengthen] is not implemented!"
+
+
+let infer_hole_type (f : pre_simplification_fun) (env : Environ.env) (evd : Evd.evar_map ref)
+  ((ctx, ty) as gl : goal) : open_term_with_context =
+  let ctx', term = f env evd gl in
+  (* We just want to create temporary evars. *)
+  let evd = ref !evd in
+  let ev_ty, tev =
+    let env = Environ.push_rel_context ctx' env in
+    let ev_ty, _ = Evarutil.e_new_type_evar env evd Evd.univ_flexible_alg in
+    let tev = Evarutil.e_new_evar env evd ev_ty in
+      ev_ty, tev
+  in
+  let () = let env = Environ.push_rel_context ctx env in
+    Typing.check env evd (term tev) ty in
+  let ty = Evd.existential_value !evd (Term.destEvar ev_ty) in
+    (ctx', ty), term
 
 (* Add a typing check. *)
 let safe_term (env : Environ.env) (evd : Evd.evar_map ref)
@@ -105,7 +125,7 @@ let compose_fun (f : simplification_fun) (g : simplification_fun)
  * rule cannot apply. *)
 
 let deletion ~(force:bool) (env : Environ.env) (evd : Evd.evar_map ref)
-  ((ctx, ty) : goal) : open_term_with_context =
+  ((ctx, ty) : goal) : Context.rel_context * open_term =
   try
     let name, ty1, ty2 = Term.destProd ty in
       let ind, args = Term.decompose_appvect ty1 in
@@ -115,7 +135,7 @@ let deletion ~(force:bool) (env : Environ.env) (evd : Evd.evar_map ref)
       else
         if Vars.noccurn 1 ty2 then
           (* The goal does not depend on the equality, we can just eliminate it. *)
-          (ctx, Vars.lift (-1) ty2), fun c ->
+          ctx, fun c ->
             Constr.mkLambda (Names.Anonymous, ty1, Vars.lift 1 c)
         else
           let tA = args.(0) in
@@ -123,7 +143,7 @@ let deletion ~(force:bool) (env : Environ.env) (evd : Evd.evar_map ref)
           let tB = Constr.mkLambda (name, ty1, ty2) in
           let teq_refl = Constr.mkApp (CoqRefs.eq_refl evd, [| tA; tx |]) in
           let ty = Vars.subst1 teq_refl ty2 in
-          (ctx, ty), if force then
+          ctx, if force then
             (* The user wants to use K directly. *)
             let tsimpl_K = CoqRefs.simpl_K evd in
             fun c ->
@@ -146,6 +166,7 @@ let deletion ~(force:bool) (env : Environ.env) (evd : Evd.evar_map ref)
   with
   | Term.DestKO -> raise (CannotSimplify (str
       "[deletion] The goal is not a product."))
+let deletion ~force = infer_hole_type (deletion ~force)
 
 let solution ~dir:direction (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : open_term_with_context =
@@ -207,7 +228,6 @@ let simplify_tac (rules : simplification_rules) : unit Proofview.tactic =
   Proofview.Goal.enter begin fun gl ->
     let gl = Proofview.Goal.assume gl in
     let env = Environ.reset_context (Proofview.Goal.env gl) in
-    let evd = Proofview.Goal.sigma gl in
     let hyps = Proofview.Goal.hyps gl in
     (* We want to work in a [rel_context], not a [named_context]. *)
     let ctx, subst = Covering.rel_of_named_context hyps in
@@ -217,13 +237,12 @@ let simplify_tac (rules : simplification_rules) : unit Proofview.tactic =
     let ty = Vars.subst_vars subst concl in
     (* [ty'] is the expected type of the hole in the term, under the
      * context [ctx']. *)
-    let evd = ref evd in
-    let (ctx', ty'), term = simplify rules env evd (ctx, ty) in
-      Proofview.Refine.refine (fun evd' ->
-        evd := evd';
-        let c = let env = Environ.push_rel_context ctx' env in
+    Proofview.Refine.refine (fun evd ->
+      let evd = ref evd in
+      let (ctx', ty'), term = simplify rules env evd (ctx, ty) in
+      let c = let env = Environ.push_rel_context ctx' env in
           Evarutil.e_new_evar ~principal:true env evd ty'
-        in !evd, term c)
+      in !evd, term c)
   end
 
 
