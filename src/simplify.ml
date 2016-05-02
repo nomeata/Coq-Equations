@@ -65,7 +65,7 @@ type open_term_with_context = goal * open_term
 exception CannotSimplify of Pp.std_ppcmds
 
 type pre_simplification_fun =
-  Environ.env -> Evd.evar_map ref -> goal -> Context.rel_context * open_term
+  Environ.env -> Evd.evar_map ref -> goal -> open_term
 
 type simplification_fun =
   Environ.env -> Evd.evar_map ref -> goal -> open_term_with_context
@@ -77,9 +77,21 @@ let strengthen (env : Environ.env) (evd : Evd.evar_map) (ctx : Context.rel_conte
   failwith "[strengthen] is not implemented!"
 
 
-let infer_hole_type (f : pre_simplification_fun) (env : Environ.env) (evd : Evd.evar_map ref)
+(* Infer the context and the type of the hole in the term returned by a
+ * simplification function. It is assumed there is exactly one hole. *)
+let infer_hole (f : pre_simplification_fun) (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) as gl : goal) : open_term_with_context =
-  let ctx', term = f env evd gl in
+  let term = f env evd gl in
+  (* Now to determine the context of the hole. *)
+  let ctx' = ref ctx in
+  let hole = Term.mkRel 0 in
+  let c = term hole in
+  (* Collect the context above the hole. *)
+  let rec aux (ctx : Context.rel_context) (c : Term.constr) =
+    if Constr.equal c hole then ctx' := ctx
+    else Termops.iter_constr_with_full_binders Context.add_rel_decl aux ctx c
+  in aux ctx c;
+  let ctx' = !ctx' in
   (* We just want to create temporary evars. *)
   let evd = ref !evd in
   let ev_ty, tev =
@@ -125,7 +137,7 @@ let compose_fun (f : simplification_fun) (g : simplification_fun)
  * rule cannot apply. *)
 
 let deletion ~(force:bool) (env : Environ.env) (evd : Evd.evar_map ref)
-  ((ctx, ty) : goal) : Context.rel_context * open_term =
+  ((ctx, ty) : goal) : open_term =
   try
     let name, ty1, ty2 = Term.destProd ty in
       let ind, args = Term.decompose_appvect ty1 in
@@ -135,15 +147,13 @@ let deletion ~(force:bool) (env : Environ.env) (evd : Evd.evar_map ref)
       else
         if Vars.noccurn 1 ty2 then
           (* The goal does not depend on the equality, we can just eliminate it. *)
-          ctx, fun c ->
+          fun c ->
             Constr.mkLambda (Names.Anonymous, ty1, Vars.lift 1 c)
         else
           let tA = args.(0) in
           let tx = args.(1) in
           let tB = Constr.mkLambda (name, ty1, ty2) in
-          let teq_refl = Constr.mkApp (CoqRefs.eq_refl evd, [| tA; tx |]) in
-          let ty = Vars.subst1 teq_refl ty2 in
-          ctx, if force then
+          if force then
             (* The user wants to use K directly. *)
             let tsimpl_K = CoqRefs.simpl_K evd in
             fun c ->
@@ -166,7 +176,7 @@ let deletion ~(force:bool) (env : Environ.env) (evd : Evd.evar_map ref)
   with
   | Term.DestKO -> raise (CannotSimplify (str
       "[deletion] The goal is not a product."))
-let deletion ~force = infer_hole_type (deletion ~force)
+let deletion ~force = infer_hole (deletion ~force)
 
 let solution ~dir:direction (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : open_term_with_context =
