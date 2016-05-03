@@ -16,6 +16,10 @@ module type COQREFS =
     val simpl_sigma1_dep_dep : constr_gen
     val simpl_K : constr_gen
     val simpl_K_dec : constr_gen
+    val solution_left : constr_gen
+    val solution_left_dep : constr_gen
+    val solution_right : constr_gen
+    val solution_right_dep : constr_gen
   end
 
 module CoqRefs : COQREFS = struct
@@ -27,20 +31,20 @@ module CoqRefs : COQREFS = struct
 
   let init_reference = Coqlib.find_reference "Equations.Simplify"
   let load_ref dir s = gen_from_ref (lazy (init_reference dir s))
+  let load_depelim s = load_ref ["Equations"; "DepElim"] s
 
   let eq = gen_from_ref (Lazy.from_fun Coqlib.build_coq_eq)
   let eq_refl = gen_from_ref (Lazy.from_fun Coqlib.build_coq_eq_refl)
   let eq_dec = load_ref ["Equations"; "EqDec"] "EqDec"
-  let simpl_sigma1 = load_ref ["Equations"; "DepElim"]
-    "eq_simplification_sigma1"
-  let simpl_sigma1_dep = load_ref ["Equations"; "DepElim"]
-    "eq_simplification_sigma1_dep"
-  let simpl_sigma1_dep_dep = load_ref ["Equations"; "DepElim"]
-    "eq_simplification_sigma1_dep_dep"
-  let simpl_K = load_ref ["Equations"; "DepElim"]
-    "simplification_K"
-  let simpl_K_dec = load_ref ["Equations"; "DepElim"]
-    "simplification_K_dec"
+  let simpl_sigma1 = load_depelim "eq_simplification_sigma1"
+  let simpl_sigma1_dep = load_depelim "eq_simplification_sigma1_dep"
+  let simpl_sigma1_dep_dep = load_depelim "eq_simplification_sigma1_dep_dep"
+  let simpl_K = load_depelim "simplification_K"
+  let simpl_K_dec = load_depelim "simplification_K_dec"
+  let solution_left = load_depelim "solution_left"
+  let solution_left_dep = load_depelim "solution_left_dep"
+  let solution_right = load_depelim "solution_right"
+  let solution_right_dep = load_depelim "solution_right_dep"
 end
 
 (* ========== Simplification ========== *)
@@ -72,9 +76,54 @@ type simplification_fun =
 
 (* Auxiliary functions. *)
 
+(* Return a substitution (and its inverse) which is just a permutation
+ * of the variables in the context which is well-typed, and such that
+ * all variables in [t] (and their own dependencies) are now declared
+ * before [x] in the context. *)
 let strengthen (env : Environ.env) (evd : Evd.evar_map) (ctx : Context.rel_context)
-  (x : int) (t : Term.constr) : Covering.context_map * Covering.context_map =
-  failwith "[strengthen] is not implemented!"
+  (x : int) ?(rels : Int.Set.t = Covering.rels_above ctx x) (t : Term.constr) :
+    Covering.context_map * Covering.context_map =
+  let rels = Int.Set.union rels (Covering.dependencies_of_term env evd ctx t x) in
+  let maybe_reduce k t =
+    if Int.Set.mem k (Termops.free_rels t) then
+      Reductionops.nf_betadeltaiota env evd t
+    else t
+  in
+  (* We may have to normalize some declarations in the context if they
+   * mention [x] syntactically when they shouldn't. *)
+  let ctx = CList.map_i (fun k decl ->
+    if Int.Set.mem k rels && k < x then
+      Context.map_rel_declaration (maybe_reduce (x - k)) decl
+    else decl) 1 ctx in
+  (* Now we want to put everything in [rels] as the oldest part of the context,
+   * and everything else after. The invariant is that the context
+   * [subst (rev (before @ after)) @ ctx] is well-typed. *)
+  (* We also create along what we need to build the actual substitution. *)
+  let len_ctx = Context.rel_context_length ctx in
+  let lifting = len_ctx - Int.Set.cardinal rels in
+  let rev_subst = Array.make len_ctx (Covering.PRel 0) in
+  let rec aux k before after n subst = function
+  | decl :: ctx ->
+      if Int.Set.mem k rels then
+        let subst = Covering.PRel (k + lifting) :: subst in
+        rev_subst.(k + lifting - 1) <- Covering.PRel k;
+        aux (succ k) (decl :: before) after n subst ctx
+      else
+        let subst = Covering.PRel n :: subst in
+        rev_subst.(n - 1) <- Covering.PRel k;
+        aux (succ k) before (decl :: after) (succ n) subst ctx
+  | [] -> CList.rev (before @ after), CList.rev subst
+  in
+  (* Now [subst] is a list of indices which represents the substitution
+   * that we must apply. *)
+  (* Right now, [ctx'] is an ill-typed rel_context, we need to apply [subst]. *)
+  let (ctx', subst) = aux 1 [] [] 1 [] ctx in
+  let rev_subst = Array.to_list rev_subst in
+  let ctx' = Covering.subst_context subst ctx' in
+  (* Now we have everything need to build the two substitutions. *)
+  let s = Covering.mk_ctx_map evd ctx' subst ctx in
+  let rev_s = Covering.mk_ctx_map evd ctx rev_subst ctx' in
+    s, rev_s
 
 
 (* Infer the context and the type of the hole in the term returned by a
@@ -205,7 +254,17 @@ let deletion ~force = infer_hole (deletion ~force)
 
 let solution ~dir:direction (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : open_term_with_context =
-  failwith "[solution] is not implemented!"
+  let var_left = match direction with Left -> true | Right -> false in
+  let var_right = not var_left in
+  let (name, ty1, ty2), (tA, tx, ty) =
+    check_equality ~var_left ~var_right env evd ty in
+  let rel, term =
+    if var_left then Term.destRel tx, ty
+    else Term.destRel ty, tx
+  in
+  let (_, _, ctx') as subst, rev_subst =
+    strengthen env !evd ctx rel term in
+    failwith "[solution] is not implemented!"
 
 let noConfusion (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : open_term_with_context =

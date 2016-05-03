@@ -23,9 +23,12 @@ type simplification_fun =
 (* Auxiliary functions. *)
 
 (* Return a substitution and its inverse. *)
+(* For more flexibility, [rels] is a set of indices which are to be
+ * moved before the variable. By default, this is everything already before
+ * the variable. *)
 val strengthen :
   Environ.env -> Evd.evar_map ->
-  Context.rel_context -> int -> Term.constr ->
+  Context.rel_context -> int -> ?rels:Int.Set.t -> Term.constr ->
   Covering.context_map * Covering.context_map
 
 val safe_term : Environ.env -> Evd.evar_map ref ->
