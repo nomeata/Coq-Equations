@@ -125,22 +125,11 @@ let strengthen (env : Environ.env) (evd : Evd.evar_map) (ctx : Context.rel_conte
   let rev_s = Covering.mk_ctx_map evd ctx rev_subst ctx' in
     s, rev_s
 
-
 (* Infer the context and the type of the hole in the term returned by a
  * simplification function. It is assumed there is exactly one hole. *)
-let infer_hole (f : pre_simplification_fun) (env : Environ.env) (evd : Evd.evar_map ref)
-  ((ctx, ty) as gl : goal) : open_term_with_context =
-  let term = f env evd gl in
-  (* Now to determine the context of the hole. *)
-  let ctx' = ref ctx in
-  let hole = Term.mkRel 0 in
-  let c = term hole in
-  (* Collect the context above the hole. *)
-  let rec aux (ctx : Context.rel_context) (c : Term.constr) =
-    if Constr.equal c hole then ctx' := ctx
-    else Termops.iter_constr_with_full_binders Context.add_rel_decl aux ctx c
-  in aux ctx c;
-  let ctx' = !ctx' in
+let infer_hole_type (env : Environ.env) (evd : Evd.evar_map ref)
+  ((ctx, ty) : goal) (ctx' : Context.rel_context)
+  (term : open_term) : Term.types =
   (* We just want to create temporary evars. *)
   let evd = ref !evd in
   let ev_ty, tev =
@@ -152,6 +141,25 @@ let infer_hole (f : pre_simplification_fun) (env : Environ.env) (evd : Evd.evar_
   let () = let env = Environ.push_rel_context ctx env in
     Typing.check env evd (term tev) ty in
   let ty = Evd.existential_value !evd (Term.destEvar ev_ty) in
+    ty
+
+let infer_hole_context (env : Environ.env) (evd : Evd.evar_map ref)
+  ((ctx, ty) : goal) (term : open_term) : Context.rel_context =
+  (* Determine the context of the hole. *)
+  let ctx' = ref ctx in
+  let hole = Term.mkRel 0 in
+  let c = term hole in
+  (* Collect the context above the hole. *)
+  let rec aux (ctx : Context.rel_context) (c : Term.constr) =
+    if Constr.equal c hole then ctx' := ctx
+    else Termops.iter_constr_with_full_binders Context.add_rel_decl aux ctx c
+  in aux ctx c; !ctx'
+
+let infer_hole (f : pre_simplification_fun) (env : Environ.env) (evd : Evd.evar_map ref)
+  (gl : goal) : open_term_with_context =
+  let term = f env evd gl in
+  let ctx' = infer_hole_context env evd gl term in
+  let ty = infer_hole_type env evd gl ctx' term in
     (ctx', ty), term
 
 (* Add a typing check. *)
@@ -195,24 +203,22 @@ let check_equality ?(equal_terms : bool = false)
     let ind, args = Term.decompose_appvect ty1 in
     if not (Constr.equal ind (CoqRefs.eq evd)) then
       raise (CannotSimplify (str
-        "The first hypothesis in the goal is not an equality."))
-    else
-      let tA = args.(0) in
-      let tx, ty = args.(1), args.(2) in
+        "The first hypothesis in the goal is not an equality."));
+    let tA = args.(0) in
+    let tx, ty = args.(1), args.(2) in
     if equal_terms && not (Constr.equal tx ty) then
       raise (CannotSimplify (str
         "The first hypothesis in the goal is not an equality
-         between identical terms."))
-    else if var_left && not (Term.isRel tx) then
+         between identical terms."));
+    if var_left && not (Term.isRel tx) then
       raise (CannotSimplify (str
         "The left-hand side of the first hypothesis in the goal is
-         not a variable."))
-    else if var_right && not (Term.isRel ty) then
+         not a variable."));
+    if var_right && not (Term.isRel ty) then
       raise (CannotSimplify (str
         "The right-hand side of the first hypothesis in the goal is
-         not a variable."))
-    else
-      (name, ty1, ty2), (tA, tx, ty)
+         not a variable."));
+    (name, ty1, ty2), (tA, tx, ty)
   with
   | Term.DestKO -> raise (CannotSimplify (str "The goal is not a product."))
 
@@ -262,8 +268,10 @@ let solution ~dir:direction (env : Environ.env) (evd : Evd.evar_map ref)
     if var_left then Term.destRel tx, ty
     else Term.destRel ty, tx
   in
-  let (_, _, ctx') as subst, rev_subst =
-    strengthen env !evd ctx rel term in
+  if Int.Set.mem rel (Covering.dependencies_of_term env !evd ctx term rel) then
+   raise (CannotSimplify (str
+    "[solution] The variable appears on both sides of the equality.")); 
+  let (ctx', _, _) as subst, rev_subst = strengthen env !evd ctx rel term in
     failwith "[solution] is not implemented!"
 
 let noConfusion (env : Environ.env) (evd : Evd.evar_map ref)
