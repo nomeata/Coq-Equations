@@ -132,50 +132,75 @@ let compose_fun (f : simplification_fun) (g : simplification_fun)
   let term2 = f env evd gl in
     compose_term term1 term2
 
+(* Check that the first hypothesis in the goal is an equality, and some
+ * additional constraints if specified. Raise CannotSimplify if it's
+ * not the case. Otherwise, return the goal decomposed in two types,
+ * the Name of the equality, and its arguments. *)
+let check_equality ?(equal_terms : bool = false)
+  ?(var_left : bool = false) ?(var_right : bool = false)
+  (env : Environ.env) (evd : Evd.evar_map ref) (ty : Term.types) :
+    ((Names.name * Term.types * Term.types) *
+     (Term.types * Term.constr * Term.constr)) =
+  try
+    let name, ty1, ty2 = Term.destProd ty in
+    let ind, args = Term.decompose_appvect ty1 in
+    if not (Constr.equal ind (CoqRefs.eq evd)) then
+      raise (CannotSimplify (str
+        "The first hypothesis in the goal is not an equality."))
+    else
+      let tA = args.(0) in
+      let tx, ty = args.(1), args.(2) in
+    if equal_terms && not (Constr.equal tx ty) then
+      raise (CannotSimplify (str
+        "The first hypothesis in the goal is not an equality
+         between identical terms."))
+    else if var_left && not (Term.isRel tx) then
+      raise (CannotSimplify (str
+        "The left-hand side of the first hypothesis in the goal is
+         not a variable."))
+    else if var_right && not (Term.isRel ty) then
+      raise (CannotSimplify (str
+        "The right-hand side of the first hypothesis in the goal is
+         not a variable."))
+    else
+      (name, ty1, ty2), (tA, tx, ty)
+  with
+  | Term.DestKO -> raise (CannotSimplify (str "The goal is not a product."))
+
 (* Simplification functions to handle each step. *)
 (* Any of these can throw a CannotSimplify exception which explains why the
  * rule cannot apply. *)
 
 let deletion ~(force:bool) (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : open_term =
-  try
-    let name, ty1, ty2 = Term.destProd ty in
-      let ind, args = Term.decompose_appvect ty1 in
-      if not (Constr.equal ind (CoqRefs.eq evd)) then
-        raise (CannotSimplify (str
-          "[deletion] The first hypothesis in the goal is not an equality."))
-      else
-        if Vars.noccurn 1 ty2 then
-          (* The goal does not depend on the equality, we can just eliminate it. *)
-          fun c ->
-            Constr.mkLambda (Names.Anonymous, ty1, Vars.lift 1 c)
-        else
-          let tA = args.(0) in
-          let tx = args.(1) in
-          let tB = Constr.mkLambda (name, ty1, ty2) in
-          if force then
-            (* The user wants to use K directly. *)
-            let tsimpl_K = CoqRefs.simpl_K evd in
-            fun c ->
-              Constr.mkApp (tsimpl_K, [| tA; tx; tB; c |])
-          else
-            (* We will try to find an instance of K for the type [A]. *)
-            let tsimpl_K_dec = CoqRefs.simpl_K_dec evd in
-            let eqdec_ty = Constr.mkApp (CoqRefs.eq_dec evd, [| tA |]) in
-            let tdec =
-              let env = Environ.push_rel_context ctx env in
-              try
-                Evarutil.evd_comb1
-                  (Typeclasses.resolve_one_typeclass env) evd eqdec_ty
-              with Not_found ->
-                raise (CannotSimplify (str
-                  "[deletion] Cannot simplify without K on type " ++
-                  Printer.pr_constr_env env !evd tA))
-            in fun c ->
-              Constr.mkApp (tsimpl_K_dec, [| tA; tdec; tx; tB; c |])
-  with
-  | Term.DestKO -> raise (CannotSimplify (str
-      "[deletion] The goal is not a product."))
+  let (name, ty1, ty2), (tA, tx, _) =
+    check_equality ~equal_terms:true env evd ty in
+  if Vars.noccurn 1 ty2 then
+    (* The goal does not depend on the equality, we can just eliminate it. *)
+    fun c ->
+      Constr.mkLambda (Names.Anonymous, ty1, Vars.lift 1 c)
+  else
+    let tB = Constr.mkLambda (name, ty1, ty2) in
+    if force then
+      (* The user wants to use K directly. *)
+      let tsimpl_K = CoqRefs.simpl_K evd in
+      fun c ->
+        Constr.mkApp (tsimpl_K, [| tA; tx; tB; c |])
+    else
+      (* We will try to find an instance of K for the type [A]. *)
+      let tsimpl_K_dec = CoqRefs.simpl_K_dec evd in
+      let eqdec_ty = Constr.mkApp (CoqRefs.eq_dec evd, [| tA |]) in
+      let tdec =
+        let env = Environ.push_rel_context ctx env in
+        try
+          Evarutil.evd_comb1
+            (Typeclasses.resolve_one_typeclass env) evd eqdec_ty
+        with Not_found ->
+          raise (CannotSimplify (str
+            "[deletion] Cannot simplify without K on type " ++
+            Printer.pr_constr_env env !evd tA))
+      in fun c ->
+          Constr.mkApp (tsimpl_K_dec, [| tA; tdec; tx; tB; c |])
 let deletion ~force = infer_hole (deletion ~force)
 
 let solution ~dir:direction (env : Environ.env) (evd : Evd.evar_map ref)
