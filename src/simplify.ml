@@ -105,12 +105,18 @@ let strengthen (env : Environ.env) (evd : Evd.evar_map) (ctx : Context.rel_conte
   let rec aux k before after n subst = function
   | decl :: ctx ->
       if Int.Set.mem k rels then
-        let subst = Covering.PRel (k + lifting) :: subst in
-        rev_subst.(k + lifting - 1) <- Covering.PRel k;
+        let subst = Covering.PRel (k + lifting - n + 1) :: subst in
+        rev_subst.(k + lifting - n) <- Covering.PRel k;
+        (* We lift the declaration not to be well-typed in the new context,
+         * but so that it reflects in a raw way its movement in the context.
+         * This allows to apply a simple substitution afterwards, instead
+         * of going through the whole context at each step. *)
+        let decl = Context.map_rel_declaration (Vars.lift (n - lifting - 1)) decl in
         aux (succ k) (decl :: before) after n subst ctx
       else
         let subst = Covering.PRel n :: subst in
         rev_subst.(n - 1) <- Covering.PRel k;
+        let decl = Context.map_rel_declaration (Vars.lift (k - n)) decl in
         aux (succ k) before (decl :: after) (succ n) subst ctx
   | [] -> CList.rev (before @ after), CList.rev subst
   in
@@ -119,7 +125,14 @@ let strengthen (env : Environ.env) (evd : Evd.evar_map) (ctx : Context.rel_conte
   (* Right now, [ctx'] is an ill-typed rel_context, we need to apply [subst]. *)
   let (ctx', subst) = aux 1 [] [] 1 [] ctx in
   let rev_subst = Array.to_list rev_subst in
-  let ctx' = Covering.subst_context subst ctx' in
+  (* Fix the context [ctx'] by using [subst]. *)
+  (* We lift each declaration to make it appear as if it was under the
+   * whole context, which allows then to apply the substitution, and lift
+   * it back to its place. *)
+  let do_subst k c = Vars.lift (-k)
+    (Covering.specialize_constr subst (Vars.lift k c)) in
+  let ctx' = CList.map_i (fun k decl ->
+    Context.map_rel_declaration (do_subst k) decl) 1 ctx' in
   (* Now we have everything need to build the two substitutions. *)
   let s = Covering.mk_ctx_map evd ctx' subst ctx in
   let rev_s = Covering.mk_ctx_map evd ctx rev_subst ctx' in
@@ -192,7 +205,7 @@ let compose_fun (f : simplification_fun) (g : simplification_fun)
 (* Check that the first hypothesis in the goal is an equality, and some
  * additional constraints if specified. Raise CannotSimplify if it's
  * not the case. Otherwise, return the goal decomposed in two types,
- * the Name of the equality, and its arguments. *)
+ * the Name of the equality, its arguments. *)
 let check_equality ?(equal_terms : bool = false)
   ?(var_left : bool = false) ?(var_right : bool = false)
   (env : Environ.env) (evd : Evd.evar_map ref) (ty : Term.types) :
@@ -232,8 +245,7 @@ let deletion ~(force:bool) (env : Environ.env) (evd : Evd.evar_map ref)
     check_equality ~equal_terms:true env evd ty in
   if Vars.noccurn 1 ty2 then
     (* The goal does not depend on the equality, we can just eliminate it. *)
-    fun c ->
-      Constr.mkLambda (Names.Anonymous, ty1, Vars.lift 1 c)
+    fun c -> Constr.mkLambda (name, ty1, Vars.lift 1 c)
   else
     let tB = Constr.mkLambda (name, ty1, ty2) in
     if force then
@@ -258,21 +270,89 @@ let deletion ~(force:bool) (env : Environ.env) (evd : Evd.evar_map ref)
           Constr.mkApp (tsimpl_K_dec, [| tA; tdec; tx; tB; c |])
 let deletion ~force = infer_hole (deletion ~force)
 
-let solution ~dir:direction (env : Environ.env) (evd : Evd.evar_map ref)
-  ((ctx, ty) : goal) : open_term_with_context =
-  let var_left = match direction with Left -> true | Right -> false in
+let solution ~(dir:direction) (env : Environ.env) (evd : Evd.evar_map ref)
+  ((ctx, ty) as gl : goal) : open_term_with_context =
+  let var_left = match dir with Left -> true | Right -> false in
   let var_right = not var_left in
-  let (name, ty1, ty2), (tA, tx, ty) =
+  let (name, ty1, ty2), (tA, tx, tz) =
     check_equality ~var_left ~var_right env evd ty in
-  let rel, term =
-    if var_left then Term.destRel tx, ty
-    else Term.destRel ty, tx
+  let trel, term =
+    if var_left then tx, tz
+    else tz, tx
   in
+  let rel = Term.destRel trel in
   if Int.Set.mem rel (Covering.dependencies_of_term env !evd ctx term rel) then
    raise (CannotSimplify (str
     "[solution] The variable appears on both sides of the equality.")); 
   let (ctx', _, _) as subst, rev_subst = strengthen env !evd ctx rel term in
-    failwith "[solution] is not implemented!"
+  let trel' = Covering.mapping_constr subst trel in
+  let rel' = Term.destRel trel' in
+  let term' = Covering.mapping_constr subst term in
+  let tA' = Covering.mapping_constr subst tA in
+  let ty1' = Covering.mapping_constr subst ty1 in
+  (* We will have to generalize everything after [x'] in the new
+   * context. *)
+  let after', (name', _, _), before' = Covering.split_context (pred rel') ctx' in
+  (* let after, _, before = Covering.split_context rel ctx in*)
+  
+  (* Select the correct solution lemma. *)
+  let nondep = Vars.noccurn 1 ty2 in
+  let tsolution = begin match var_left, nondep with
+  | false, false -> CoqRefs.solution_right_dep
+  | false, true -> CoqRefs.solution_right
+  | true, false -> CoqRefs.solution_left_dep
+  | true, true -> CoqRefs.solution_left end evd
+  in
+  let tB' =
+    let body = Covering.mapping_constr subst ty in
+    (* Right now, [body] has an equality at the head that we want
+     * to move, in some sense. *)
+    let _, _, body = Term.destProd body in
+    if nondep then
+      let body = Vars.lift (-1) body in
+      let body = Term.it_mkProd_or_LetIn body after' in
+        (* [body] is a term in the context [decl' :: before'],
+         * whereas [tA'] lives in [ctx']. *)
+        Constr.mkLambda (name', Vars.lift (-rel') tA', body)
+    else
+      (* We make some room for the equality. *)
+      let body = Vars.liftn 1 (succ rel') body in
+      let body = Vars.subst1 (Constr.mkRel rel') body in
+      let after' = Termops.lift_rel_context 1 after' in
+      let body = Term.it_mkProd_or_LetIn body after' in
+      let body = Constr.mkLambda (name, Vars.lift (1-rel') ty1', body) in
+        Constr.mkLambda (name', Vars.lift (-rel') tA', body)
+  in
+  (* [tB'] is a term in the context [before']. We want it in [ctx']. *)
+  let tB' = Vars.lift rel' tB' in
+  let targs' = Termops.extended_rel_vect 1 after' in
+  (* [ctx''] is just [ctx'] where we replaced the substituted variable. *)
+  let ctx'' = Covering.subst_in_ctx rel' term' ctx' in
+  let after'', _ = CList.chop (pred rel') ctx'' in
+  let res = fun c ->
+      (* [c] is a term in the context [ctx'']. *)
+      let c = Term.it_mkLambda_or_LetIn c after'' in
+      (* [c] is a term in the context [before']. *)
+      let c = Vars.lift rel' c in
+      (* [c] is a term in the context [ctx']. *)
+      let c =
+        if nondep then
+          Constr.mkApp (tsolution, [| tA'; tB'; term'; c; trel' |])
+        else
+          Constr.mkApp (tsolution, [| tA'; term'; tB'; c; trel' |])
+      in
+      (* We make some room for the application of the equality... *)
+      let c = Vars.lift 1 c in
+      let c = Constr.mkApp (c, [| Constr.mkRel 1 |]) in
+      (* [targs'] are arguments in the context [eq_decl :: ctx']. *)
+      let c = Constr.mkApp (c, targs') in
+      (* [ty1'] is the type of the equality in [ctx']. *)
+      let c = Constr.mkLambda (name, ty1', c) in
+      (* And now we recover a term in the context [ctx]. *)
+        Covering.mapping_constr rev_subst c
+  in
+  let ty'' = infer_hole_type env evd gl ctx'' res in
+    (ctx'', ty''), res
 
 let noConfusion (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : open_term_with_context =
