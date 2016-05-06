@@ -413,18 +413,22 @@ let simplify_tac (rules : simplification_rules) : unit Proofview.tactic =
     let hyps = Proofview.Goal.hyps gl in
     (* We want to work in a [rel_context], not a [named_context]. *)
     let ctx, subst = Covering.rel_of_named_context hyps in
+    let rev_subst, _ = Covering.named_of_rel_context ctx in
     let concl = Proofview.Goal.concl gl in
     (* We also need to convert the goal for it to be well-typed in
      * the [rel_context]. *)
     let ty = Vars.subst_vars subst concl in
     (* [ty'] is the expected type of the hole in the term, under the
      * context [ctx']. *)
-    Proofview.Refine.refine (fun evd ->
+    Proofview.Refine.refine ~unsafe:false (fun evd ->
       let evd = ref evd in
       let (ctx', ty'), term = simplify rules env evd (ctx, ty) in
       let c = let env = Environ.push_rel_context ctx' env in
           Evarutil.e_new_evar ~principal:true env evd ty'
-      in !evd, term c)
+      in
+      let c = term c in
+      let c = Vars.substl rev_subst c in
+        !evd, c)
   end
 
 
