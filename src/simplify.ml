@@ -6,23 +6,34 @@ open Pp
 
 type constr_gen = Evd.evar_map ref -> Term.constr
 
+module type SIGMAREFS =
+  sig
+    val sigma : constr_gen
+    val sigmaI : constr_gen
+  end
+
 module type COQREFS =
   sig
+    (* Equality type. *)
     val eq : constr_gen
     val eq_refl : constr_gen
+    (* Decidable equality typeclass. *)
     val eq_dec : constr_gen
-    val simpl_sigma1 : constr_gen
-    val simpl_sigma1_dep : constr_gen
-    val simpl_sigma1_dep_dep : constr_gen
+    (* Simplification of dependent pairs. *)
+    val simpl_sigma : constr_gen
+    val simpl_sigma_dep : constr_gen
+    val simpl_sigma_dep_dep : constr_gen
+    (* Deletion using K. *)
     val simpl_K : constr_gen
     val simpl_K_dec : constr_gen
+    (* Solution lemmas. *)
     val solution_left : constr_gen
     val solution_left_dep : constr_gen
     val solution_right : constr_gen
     val solution_right_dep : constr_gen
   end
 
-module CoqRefs : COQREFS = struct
+module RefsHelper = struct
   open Coqlib
 
   let gen_from_ref ref = fun evd ->
@@ -31,14 +42,20 @@ module CoqRefs : COQREFS = struct
 
   let init_reference = Coqlib.find_reference "Equations.Simplify"
   let load_ref dir s = gen_from_ref (lazy (init_reference dir s))
+end
+
+(* This should be parametrizable by the user. *)
+module CoqRefs : COQREFS = struct
+  include RefsHelper
+
   let load_depelim s = load_ref ["Equations"; "DepElim"] s
 
   let eq = gen_from_ref (Lazy.from_fun Coqlib.build_coq_eq)
   let eq_refl = gen_from_ref (Lazy.from_fun Coqlib.build_coq_eq_refl)
   let eq_dec = load_ref ["Equations"; "EqDec"] "EqDec"
-  let simpl_sigma1 = load_depelim "eq_simplification_sigma1"
-  let simpl_sigma1_dep = load_depelim "eq_simplification_sigma1_dep"
-  let simpl_sigma1_dep_dep = load_depelim "eq_simplification_sigma1_dep_dep"
+  let simpl_sigma = load_depelim "eq_simplification_sigma1"
+  let simpl_sigma_dep = load_depelim "eq_simplification_sigma1_dep"
+  let simpl_sigma_dep_dep = load_depelim "eq_simplification_sigma1_dep_dep"
   let simpl_K = load_depelim "simplification_K"
   let simpl_K_dec = load_depelim "simplification_K_dec"
   let solution_left = load_depelim "solution_left"
@@ -46,6 +63,15 @@ module CoqRefs : COQREFS = struct
   let solution_right = load_depelim "solution_right"
   let solution_right_dep = load_depelim "solution_right_dep"
 end
+
+(* This should not. *)
+module SigmaRefs : SIGMAREFS = struct
+  include RefsHelper
+
+  let sigma = load_ref ["Equations"; "Init"] "sigma"
+  let sigmaI = load_ref ["Equations"; "Init"] "sigmaI"
+end
+
 
 (* ========== Simplification ========== *)
 
@@ -235,9 +261,62 @@ let check_equality ?(equal_terms : bool = false)
   with
   | Term.DestKO -> raise (CannotSimplify (str "The goal is not a product."))
 
+let decompose_sigma (env : Environ.env) (evd : Evd.evar_map ref)
+  (t : Term.constr) : (Term.types * Term.constr * Term.constr * Term.constr) option =
+  try
+    let f, args = Term.destApp t in
+    (* FIXME: with a better definition of SigmaRefs.sigmaI, we shouldn't have
+     * to instantiate anything... *)
+    if not (Term.eq_constr_nounivs f (SigmaRefs.sigmaI evd)) then None
+    else Some (args.(0), args.(1), args.(2), args.(3))
+  with
+  | Term.DestKO -> None
+
 (* Simplification functions to handle each step. *)
 (* Any of these can throw a CannotSimplify exception which explains why the
  * rule cannot apply. *)
+
+(* This function is not accessible by the user for now. It is used to project
+ * (if needed) the first component of an equality between sigmas. It will not
+ * do anything if it fails, unless the first hypothesis in the goal is not
+ * even an equality. *)
+let remove_sigma (env : Environ.env) (evd : Evd.evar_map ref)
+  ((ctx, ty) : goal) : open_term =
+  let (name, ty1, ty2), (_, t1, t2) = check_equality env evd ty in
+  match decompose_sigma env evd t1, decompose_sigma env evd t2 with
+  | Some (tA, tB, tt, tp), Some (_, _, tu, tq) ->
+      (* Determine the degree of dependency. *)
+      if Vars.noccurn 1 ty2 then begin
+        (* No dependency in the goal, but maybe there is a dependency in
+           the pair itself. *)
+        try
+          let name', _, tBbody = Term.destLambda tB in
+          if Vars.noccurn 1 tBbody then
+            (* No dependency whatsoever. *)
+            let tsimpl_sigma = CoqRefs.simpl_sigma evd in
+            let tP = Vars.lift (-1) tBbody in
+            let tB = Vars.lift (-1) ty2 in
+            fun c -> Constr.mkApp
+              (tsimpl_sigma, [| tA; tP; tB; tt; tu; tp; tq; c |])
+          else raise Term.DestKO
+        with
+        | Term.DestKO ->
+            (* Dependency in the pair, but not in the goal. *)
+            let tsimpl_sigma = CoqRefs.simpl_sigma_dep evd in
+            let tP = tB in
+            let tB = Vars.lift (-1) ty2 in
+            fun c -> Constr.mkApp
+              (tsimpl_sigma, [| tA; tP; tB; tt; tu; tp; tq; c |])
+      end else
+        (* We assume full dependency. We could add one more special case,
+         * but we don't for now. *)
+        let tsimpl_sigma = CoqRefs.simpl_sigma_dep_dep evd in
+        let tP = tB in
+        let tB = Constr.mkLambda (name, ty1, ty2) in
+        fun c -> Constr.mkApp
+          (tsimpl_sigma, [| tA; tP; tt; tu; tp; tq; tB; c |])
+  | _, _ -> fun c -> c
+let remove_sigma = infer_hole remove_sigma
 
 let deletion ~(force:bool) (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : open_term =
@@ -367,6 +446,8 @@ let identity (env : Environ.env) (evd : Evd.evar_map ref)
   gl, fun c -> c
 
 
+let deletion ~force = compose_fun (deletion ~force) remove_sigma
+let solution ~dir = compose_fun (solution ~dir) remove_sigma
 
 let deletion ~force = safe_fun (deletion ~force)
 let solution ~dir = safe_fun (solution ~dir)
