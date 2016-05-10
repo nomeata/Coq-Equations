@@ -12,12 +12,15 @@ module type EQREFS = sig
   (* Equality type. *)
   val eq : Names.inductive Lazy.t
   val eq_refl : Names.constructor Lazy.t
+  val eq_rect : Names.constant Lazy.t
+  val eq_rect_r : Names.constant Lazy.t
   (* Decidable equality typeclass. *)
   val eq_dec : Names.constant Lazy.t
   (* Simplification of dependent pairs. *)
   val simpl_sigma : Names.constant Lazy.t
   val simpl_sigma_dep : Names.constant Lazy.t
   val simpl_sigma_dep_dep : Names.constant Lazy.t
+  val pack_sigma_eq : Names.constant Lazy.t
   (* Deletion using K. *)
   val simpl_K : Names.constant Lazy.t
   val simpl_K_dec : Names.constant Lazy.t
@@ -43,10 +46,13 @@ module EqRefs : EQREFS = struct
 
   let eq = lazy (Globnames.destIndRef (Coqlib.build_coq_eq ()))
   let eq_refl = lazy (Globnames.destConstructRef (Coqlib.build_coq_eq_refl ()))
+  let eq_rect = init_constant ["Coq"; "Init"; "Logic"] "eq_rect"
+  let eq_rect_r = init_constant ["Coq"; "Init"; "Logic"] "eq_rect_r"
   let eq_dec = init_constant ["Equations"; "EqDec"] "EqDec"
   let simpl_sigma = init_depelim "eq_simplification_sigma1"
   let simpl_sigma_dep = init_depelim "eq_simplification_sigma1_dep"
   let simpl_sigma_dep_dep = init_depelim "eq_simplification_sigma1_dep_dep"
+  let pack_sigma_eq = init_depelim "pack_sigma_eq"
   let simpl_K = init_depelim "simplification_K"
   let simpl_K_dec = init_depelim "simplification_K_dec"
   let solution_left = init_depelim "solution_left"
@@ -364,6 +370,50 @@ let remove_sigma (env : Environ.env) (evd : Evd.evar_map ref)
   | _, _ -> fun c -> c
 let remove_sigma = infer_hole remove_sigma
 
+(* This function is not accessible by the user for now. It is used to
+ * reduce the application of some constants to [eq_refl] in the
+ * goal. *)
+let reduce_eq_refl (env : Environ.env) (evd : Evd.evar_map ref)
+  ((ctx, ty) : goal) : open_term_with_context =
+  (* Will throw [Term.DestKO] if [t] is not [eq_refl]. *)
+  let is_eq_refl t =
+    let g, _ = Term.destApp t in
+    let constr = Univ.out_punivs (Term.destConstruct g) in
+    if not (Names.eq_constructor constr (Lazy.force EqRefs.eq_refl)) then
+      raise Term.DestKO
+  in
+  (* This list contains pairs of a reference to a lemma, and
+   * a pair made of an index and a function. The index corresponds
+   * to the argument that has to be [eq_refl] for the reduction
+   * to be doable. The function takes the arguments and returns
+   * a new term to replace the application of the lemma to
+   * [eq_refl]. This function can raise [Term.DestKO] if the
+   * arguments still do not have correct values. *)
+  let changes = [
+    Lazy.force EqRefs.eq_rect, (5, fun args -> args.(3));
+    Lazy.force EqRefs.eq_rect_r, (5, fun args -> args.(3));
+    Lazy.force EqRefs.pack_sigma_eq, (6, fun args ->
+      is_eq_refl args.(7);
+      let sigma = Builder.sigma evd in
+      let sigmaI = Builder.sigmaI evd in
+      let eq_refl = Builder.eq_refl evd in
+      let ty = Term.mkApp (sigma, [| args.(0); args.(1) |]) in
+      let tx = Term.mkApp (sigmaI, [| args.(0); args.(1); args.(2); args.(4) |]) in
+      Term.mkApp (eq_refl, [| ty; tx |]))
+  ] in
+  (* We scan recursively every subterm of the goal type and look for one
+   * of the above-defined reductions. *)
+  let rec change c =
+    try
+      let t, args = Term.destApp c in
+      let f = Univ.out_punivs (Term.destConst t) in
+      let arg, change_fun = CList.assoc_f Names.Constant.equal f changes in
+      (* We want to check that [args.(arg)] is indeed [eq_refl]. *)
+      is_eq_refl args.(arg);
+      Term.map_constr change (change_fun args)
+    with Not_found | Term.DestKO -> Term.map_constr change c
+  in (ctx, change ty), fun c -> c
+
 let deletion ~(force:bool) (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : open_term =
   let (name, ty1, ty2), (tA, tx, _) =
@@ -491,17 +541,6 @@ let identity (env : Environ.env) (evd : Evd.evar_map ref)
   (gl : goal) : open_term_with_context =
   gl, fun c -> c
 
-
-let deletion ~force = compose_fun (deletion ~force) remove_sigma
-let solution ~dir = compose_fun (solution ~dir) remove_sigma
-
-let deletion ~force = safe_fun (deletion ~force)
-let solution ~dir = safe_fun (solution ~dir)
-let noConfusion = safe_fun noConfusion
-let noCycle = safe_fun noCycle
-let identity = safe_fun identity
-
-
 let execute_step : simplification_step -> simplification_fun = function
   | Deletion force -> deletion ~force
   | Solution (Some dir) -> solution ~dir:dir
@@ -510,16 +549,20 @@ let execute_step : simplification_step -> simplification_fun = function
   (* We assume the direction has been inferred at this point. *)
   | Solution None -> assert false
 
-let infer_step ~isDir:bool (env : Environ.env) (evd : Evd.evar_map ref)
+let execute_step step = safe_fun (execute_step step)
+let execute_step step = compose_fun (execute_step step) remove_sigma
+let execute_step step = compose_fun reduce_eq_refl (execute_step step)
+
+let infer_step ~(isSol:bool) (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : simplification_step =
   failwith "[infer_step] is not implemented!"
 
 let simplify_one_aux : simplification_step option -> simplification_fun = function
   | None -> fun env evd gl ->
-      let step = infer_step ~isDir:false env evd gl in
+      let step = infer_step ~isSol:false env evd gl in
         execute_step step env evd gl
   | Some (Solution None) -> fun env evd gl ->
-      let step = infer_step ~isDir:true env evd gl in
+      let step = infer_step ~isSol:true env evd gl in
         execute_step step env evd gl
   | Some step -> execute_step step
 

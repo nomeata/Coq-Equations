@@ -55,7 +55,7 @@ val identity : simplification_fun
 val execute_step : simplification_step -> simplification_fun
 
 val infer_step :
-  isDir:bool -> Environ.env -> Evd.evar_map ref -> goal -> simplification_step
+  isSol:bool -> Environ.env -> Evd.evar_map ref -> goal -> simplification_step
 
 val simplify : simplification_rules -> simplification_fun
 
