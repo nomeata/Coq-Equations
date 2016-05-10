@@ -294,8 +294,8 @@ let remove_sigma (env : Environ.env) (evd : Evd.evar_map ref)
           if Vars.noccurn 1 tBbody then
             (* No dependency whatsoever. *)
             let tsimpl_sigma = CoqRefs.simpl_sigma evd in
-            let tP = Vars.lift (-1) tBbody in
-            let tB = Vars.lift (-1) ty2 in
+            let tP = Termops.pop tBbody in
+            let tB = Termops.pop ty2 in
             fun c -> Constr.mkApp
               (tsimpl_sigma, [| tA; tP; tB; tt; tu; tp; tq; c |])
           else raise Term.DestKO
@@ -304,7 +304,7 @@ let remove_sigma (env : Environ.env) (evd : Evd.evar_map ref)
             (* Dependency in the pair, but not in the goal. *)
             let tsimpl_sigma = CoqRefs.simpl_sigma_dep evd in
             let tP = tB in
-            let tB = Vars.lift (-1) ty2 in
+            let tB = Termops.pop ty2 in
             fun c -> Constr.mkApp
               (tsimpl_sigma, [| tA; tP; tB; tt; tu; tp; tq; c |])
       end else
@@ -388,7 +388,7 @@ let solution ~(dir:direction) (env : Environ.env) (evd : Evd.evar_map ref)
      * to move, in some sense. *)
     let _, _, body = Term.destProd body in
     if nondep then
-      let body = Vars.lift (-1) body in
+      let body = Termops.pop body in
       let body = Term.it_mkProd_or_LetIn body after' in
         (* [body] is a term in the context [decl' :: before'],
          * whereas [tA'] lives in [ctx']. *)
