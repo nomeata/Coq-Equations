@@ -3,75 +3,119 @@ open Pp
 (* ========== Coq references ========= *)
 (* This section should change a lot when we approach an actual solution. *)
 
+module type SIGMAREFS = sig
+  val sigma : Names.inductive Lazy.t
+  val sigmaI : Names.constructor Lazy.t
+end
 
-type constr_gen = Evd.evar_map ref -> Term.constr
-
-module type SIGMAREFS =
-  sig
-    val sigma : constr_gen
-    val sigmaI : constr_gen
-  end
-
-module type COQREFS =
-  sig
-    (* Equality type. *)
-    val eq : constr_gen
-    val eq_refl : constr_gen
-    (* Decidable equality typeclass. *)
-    val eq_dec : constr_gen
-    (* Simplification of dependent pairs. *)
-    val simpl_sigma : constr_gen
-    val simpl_sigma_dep : constr_gen
-    val simpl_sigma_dep_dep : constr_gen
-    (* Deletion using K. *)
-    val simpl_K : constr_gen
-    val simpl_K_dec : constr_gen
-    (* Solution lemmas. *)
-    val solution_left : constr_gen
-    val solution_left_dep : constr_gen
-    val solution_right : constr_gen
-    val solution_right_dep : constr_gen
-  end
+module type EQREFS = sig
+  (* Equality type. *)
+  val eq : Names.inductive Lazy.t
+  val eq_refl : Names.constructor Lazy.t
+  (* Decidable equality typeclass. *)
+  val eq_dec : Names.constant Lazy.t
+  (* Simplification of dependent pairs. *)
+  val simpl_sigma : Names.constant Lazy.t
+  val simpl_sigma_dep : Names.constant Lazy.t
+  val simpl_sigma_dep_dep : Names.constant Lazy.t
+  (* Deletion using K. *)
+  val simpl_K : Names.constant Lazy.t
+  val simpl_K_dec : Names.constant Lazy.t
+  (* Solution lemmas. *)
+  val solution_left : Names.constant Lazy.t
+  val solution_left_dep : Names.constant Lazy.t
+  val solution_right : Names.constant Lazy.t
+  val solution_right_dep : Names.constant Lazy.t
+end
 
 module RefsHelper = struct
-  open Coqlib
-
-  let gen_from_ref ref = fun evd ->
-    let glob = Lazy.force ref in
-      Evarutil.e_new_global evd glob
-
   let init_reference = Coqlib.find_reference "Equations.Simplify"
-  let load_ref dir s = gen_from_ref (lazy (init_reference dir s))
+  let init_inductive dir s = lazy (Globnames.destIndRef (init_reference dir s))
+  let init_constructor dir s = lazy (Globnames.destConstructRef (init_reference dir s))
+  let init_constant dir s = lazy (Globnames.destConstRef (init_reference dir s))
 end
 
 (* This should be parametrizable by the user. *)
-module CoqRefs : COQREFS = struct
+module EqRefs : EQREFS = struct
   include RefsHelper
 
-  let load_depelim s = load_ref ["Equations"; "DepElim"] s
+  let init_depelim s = init_constant ["Equations"; "DepElim"] s
 
-  let eq = gen_from_ref (Lazy.from_fun Coqlib.build_coq_eq)
-  let eq_refl = gen_from_ref (Lazy.from_fun Coqlib.build_coq_eq_refl)
-  let eq_dec = load_ref ["Equations"; "EqDec"] "EqDec"
-  let simpl_sigma = load_depelim "eq_simplification_sigma1"
-  let simpl_sigma_dep = load_depelim "eq_simplification_sigma1_dep"
-  let simpl_sigma_dep_dep = load_depelim "eq_simplification_sigma1_dep_dep"
-  let simpl_K = load_depelim "simplification_K"
-  let simpl_K_dec = load_depelim "simplification_K_dec"
-  let solution_left = load_depelim "solution_left"
-  let solution_left_dep = load_depelim "solution_left_dep"
-  let solution_right = load_depelim "solution_right"
-  let solution_right_dep = load_depelim "solution_right_dep"
+  let eq = lazy (Globnames.destIndRef (Coqlib.build_coq_eq ()))
+  let eq_refl = lazy (Globnames.destConstructRef (Coqlib.build_coq_eq_refl ()))
+  let eq_dec = init_constant ["Equations"; "EqDec"] "EqDec"
+  let simpl_sigma = init_depelim "eq_simplification_sigma1"
+  let simpl_sigma_dep = init_depelim "eq_simplification_sigma1_dep"
+  let simpl_sigma_dep_dep = init_depelim "eq_simplification_sigma1_dep_dep"
+  let simpl_K = init_depelim "simplification_K"
+  let simpl_K_dec = init_depelim "simplification_K_dec"
+  let solution_left = init_depelim "solution_left"
+  let solution_left_dep = init_depelim "solution_left_dep"
+  let solution_right = init_depelim "solution_right"
+  let solution_right_dep = init_depelim "solution_right_dep"
 end
 
 (* This should not. *)
 module SigmaRefs : SIGMAREFS = struct
   include RefsHelper
 
-  let sigma = load_ref ["Equations"; "Init"] "sigma"
-  let sigmaI = load_ref ["Equations"; "Init"] "sigmaI"
+  let sigma = init_inductive ["Equations"; "Init"] "sigma"
+  let sigmaI = init_constructor ["Equations"; "Init"] "sigmaI"
 end
 
+(* From the references, we can build terms. *)
+
+type constr_gen = Evd.evar_map ref -> Term.constr
+
+module type BUILDER = sig
+  val sigma : constr_gen
+  val sigmaI : constr_gen
+  val eq : constr_gen
+  val eq_refl : constr_gen
+  val eq_dec : constr_gen
+  val simpl_sigma : constr_gen
+  val simpl_sigma_dep : constr_gen
+  val simpl_sigma_dep_dep : constr_gen
+  val simpl_K : constr_gen
+  val simpl_K_dec : constr_gen
+  val solution_left : constr_gen
+  val solution_left_dep : constr_gen
+  val solution_right : constr_gen
+  val solution_right_dep : constr_gen
+end
+
+module BuilderHelper = struct
+  let gen_from_inductive ind = fun evd ->
+    let glob = Globnames.IndRef (Lazy.force ind) in
+      Evarutil.e_new_global evd glob
+  let gen_from_constant cst = fun evd ->
+    let glob = Globnames.ConstRef (Lazy.force cst) in
+      Evarutil.e_new_global evd glob
+  let gen_from_constructor constr = fun evd ->
+    let glob = Globnames.ConstructRef (Lazy.force constr) in
+      Evarutil.e_new_global evd glob
+end
+
+module BuilderGen (SigmaRefs : SIGMAREFS) (EqRefs : EQREFS) : BUILDER = struct
+  include BuilderHelper
+
+  let sigma = gen_from_inductive SigmaRefs.sigma
+  let sigmaI = gen_from_constructor SigmaRefs.sigmaI
+  let eq = gen_from_inductive EqRefs.eq
+  let eq_refl = gen_from_constructor EqRefs.eq_refl
+  let eq_dec = gen_from_constant EqRefs.eq_dec
+  let simpl_sigma = gen_from_constant EqRefs.simpl_sigma
+  let simpl_sigma_dep = gen_from_constant EqRefs.simpl_sigma_dep
+  let simpl_sigma_dep_dep = gen_from_constant EqRefs.simpl_sigma_dep_dep
+  let simpl_K = gen_from_constant EqRefs.simpl_K
+  let simpl_K_dec = gen_from_constant EqRefs.simpl_K_dec
+  let solution_left = gen_from_constant EqRefs.solution_left
+  let solution_left_dep = gen_from_constant EqRefs.solution_left_dep
+  let solution_right = gen_from_constant EqRefs.solution_right
+  let solution_right_dep = gen_from_constant EqRefs.solution_right_dep
+end
+
+module Builder : BUILDER = BuilderGen(SigmaRefs)(EqRefs)
 
 (* ========== Simplification ========== *)
 
@@ -237,37 +281,39 @@ let check_equality ?(equal_terms : bool = false)
   (env : Environ.env) (evd : Evd.evar_map ref) (ty : Term.types) :
     ((Names.name * Term.types * Term.types) *
      (Term.types * Term.constr * Term.constr)) =
-  try
-    let name, ty1, ty2 = Term.destProd ty in
-    let ind, args = Term.decompose_appvect ty1 in
-    if not (Constr.equal ind (CoqRefs.eq evd)) then
+  let name, ty1, ty2 = try Term.destProd ty
+    with Term.DestKO -> raise (CannotSimplify (str "The goal is not a product."))
+  in
+  let f, args = Term.decompose_appvect ty1 in
+  begin try
+    let ind = Univ.out_punivs (Term.destInd f) in
+    if not (Names.eq_ind ind (Lazy.force EqRefs.eq)) then raise Term.DestKO
+  with Term.DestKO ->
       raise (CannotSimplify (str
-        "The first hypothesis in the goal is not an equality."));
-    let tA = args.(0) in
-    let tx, ty = args.(1), args.(2) in
-    if equal_terms && not (Constr.equal tx ty) then
-      raise (CannotSimplify (str
-        "The first hypothesis in the goal is not an equality
-         between identical terms."));
-    if var_left && not (Term.isRel tx) then
-      raise (CannotSimplify (str
-        "The left-hand side of the first hypothesis in the goal is
-         not a variable."));
-    if var_right && not (Term.isRel ty) then
-      raise (CannotSimplify (str
-        "The right-hand side of the first hypothesis in the goal is
-         not a variable."));
-    (name, ty1, ty2), (tA, tx, ty)
-  with
-  | Term.DestKO -> raise (CannotSimplify (str "The goal is not a product."))
+        "The first hypothesis in the goal is not an equality."))
+  end;
+  let tA = args.(0) in
+  let tx, ty = args.(1), args.(2) in
+  if equal_terms && not (Constr.equal tx ty) then
+    raise (CannotSimplify (str
+      "The first hypothesis in the goal is not an equality
+       between identical terms."));
+  if var_left && not (Term.isRel tx) then
+    raise (CannotSimplify (str
+      "The left-hand side of the first hypothesis in the goal is
+       not a variable."));
+  if var_right && not (Term.isRel ty) then
+    raise (CannotSimplify (str
+      "The right-hand side of the first hypothesis in the goal is
+       not a variable."));
+  (name, ty1, ty2), (tA, tx, ty)
 
 let decompose_sigma (env : Environ.env) (evd : Evd.evar_map ref)
   (t : Term.constr) : (Term.types * Term.constr * Term.constr * Term.constr) option =
   try
     let f, args = Term.destApp t in
-    (* FIXME: with a better definition of SigmaRefs.sigmaI, we shouldn't have
-     * to instantiate anything... *)
-    if not (Term.eq_constr_nounivs f (SigmaRefs.sigmaI evd)) then None
+    let constr = Univ.out_punivs (Term.destConstruct f) in
+    if not (Names.eq_constructor constr (Lazy.force SigmaRefs.sigmaI)) then None
     else Some (args.(0), args.(1), args.(2), args.(3))
   with
   | Term.DestKO -> None
@@ -293,7 +339,7 @@ let remove_sigma (env : Environ.env) (evd : Evd.evar_map ref)
           let name', _, tBbody = Term.destLambda tB in
           if Vars.noccurn 1 tBbody then
             (* No dependency whatsoever. *)
-            let tsimpl_sigma = CoqRefs.simpl_sigma evd in
+            let tsimpl_sigma = Builder.simpl_sigma evd in
             let tP = Termops.pop tBbody in
             let tB = Termops.pop ty2 in
             fun c -> Constr.mkApp
@@ -302,7 +348,7 @@ let remove_sigma (env : Environ.env) (evd : Evd.evar_map ref)
         with
         | Term.DestKO ->
             (* Dependency in the pair, but not in the goal. *)
-            let tsimpl_sigma = CoqRefs.simpl_sigma_dep evd in
+            let tsimpl_sigma = Builder.simpl_sigma_dep evd in
             let tP = tB in
             let tB = Termops.pop ty2 in
             fun c -> Constr.mkApp
@@ -310,7 +356,7 @@ let remove_sigma (env : Environ.env) (evd : Evd.evar_map ref)
       end else
         (* We assume full dependency. We could add one more special case,
          * but we don't for now. *)
-        let tsimpl_sigma = CoqRefs.simpl_sigma_dep_dep evd in
+        let tsimpl_sigma = Builder.simpl_sigma_dep_dep evd in
         let tP = tB in
         let tB = Constr.mkLambda (name, ty1, ty2) in
         fun c -> Constr.mkApp
@@ -329,13 +375,13 @@ let deletion ~(force:bool) (env : Environ.env) (evd : Evd.evar_map ref)
     let tB = Constr.mkLambda (name, ty1, ty2) in
     if force then
       (* The user wants to use K directly. *)
-      let tsimpl_K = CoqRefs.simpl_K evd in
+      let tsimpl_K = Builder.simpl_K evd in
       fun c ->
         Constr.mkApp (tsimpl_K, [| tA; tx; tB; c |])
     else
       (* We will try to find an instance of K for the type [A]. *)
-      let tsimpl_K_dec = CoqRefs.simpl_K_dec evd in
-      let eqdec_ty = Constr.mkApp (CoqRefs.eq_dec evd, [| tA |]) in
+      let tsimpl_K_dec = Builder.simpl_K_dec evd in
+      let eqdec_ty = Constr.mkApp (Builder.eq_dec evd, [| tA |]) in
       let tdec =
         let env = Environ.push_rel_context ctx env in
         try
@@ -377,10 +423,10 @@ let solution ~(dir:direction) (env : Environ.env) (evd : Evd.evar_map ref)
   (* Select the correct solution lemma. *)
   let nondep = Vars.noccurn 1 ty2 in
   let tsolution = begin match var_left, nondep with
-  | false, false -> CoqRefs.solution_right_dep
-  | false, true -> CoqRefs.solution_right
-  | true, false -> CoqRefs.solution_left_dep
-  | true, true -> CoqRefs.solution_left end evd
+  | false, false -> Builder.solution_right_dep
+  | false, true -> Builder.solution_right
+  | true, false -> Builder.solution_left_dep
+  | true, true -> Builder.solution_left end evd
   in
   let tB' =
     let body = Covering.mapping_constr subst ty in
