@@ -139,16 +139,12 @@ type simplification_rules = (Loc.t * simplification_step option) list
 
 type goal = Context.rel_context * Term.types
 
-type open_term = Term.constr -> Term.constr
-type open_term_with_context = goal * open_term
+type pre_open_term = Evd.evar * Term.constr
+type open_term = goal * pre_open_term
 
 exception CannotSimplify of Pp.std_ppcmds
 
-type pre_simplification_fun =
-  Environ.env -> Evd.evar_map ref -> goal -> open_term
-
-type simplification_fun =
-  Environ.env -> Evd.evar_map ref -> goal -> open_term_with_context
+type simplification_fun = Environ.env -> Evd.evar_map ref -> goal -> open_term
 
 (* Auxiliary functions. *)
 
@@ -214,77 +210,57 @@ let strengthen (env : Environ.env) (evd : Evd.evar_map) (ctx : Context.rel_conte
   let rev_s = Covering.mk_ctx_map evd ctx rev_subst ctx' in
     s, rev_s
 
-(* Infer the context and the type of the hole in the term returned by a
- * simplification function. It is assumed there is exactly one hole. *)
-let infer_hole_type (env : Environ.env) (evd : Evd.evar_map ref)
-  ((ctx, ty) : goal) (ctx' : Context.rel_context)
-  (term : open_term) : Term.types =
-  (* We just want to create temporary evars. *)
-  let evd = ref !evd in
+(* Build an open term from a [Term.constr -> Term.constr] function, a goal
+   and an expected [Context.rel_context] for the hole, using typing to infer
+   the type of the hole. *)
+let build_term (env : Environ.env) (evd : Evd.evar_map ref) ((ctx, ty) : goal)
+  (ctx' : Context.rel_context) (f : Term.constr -> Term.constr) : open_term =
   let ev_ty, tev =
     let env = Environ.push_rel_context ctx' env in
     let ev_ty, _ = Evarutil.e_new_type_evar env evd Evd.univ_flexible_alg in
     let tev = Evarutil.e_new_evar env evd ev_ty in
       ev_ty, tev
   in
-  let () = let env = Environ.push_rel_context ctx env in
-    Typing.check env evd (term tev) ty in
-  let ty = Evd.existential_value !evd (Term.destEvar ev_ty) in
-    ty
-
-let infer_hole_context (env : Environ.env) (evd : Evd.evar_map ref)
-  ((ctx, ty) : goal) (term : open_term) : Context.rel_context =
-  (* Determine the context of the hole. *)
-  let ctx' = ref ctx in
-  let hole = Term.mkRel 0 in
-  let c = term hole in
-  (* Collect the context above the hole. *)
-  let rec aux (ctx : Context.rel_context) (c : Term.constr) =
-    if Constr.equal c hole then ctx' := ctx
-    else Termops.iter_constr_with_full_binders Context.add_rel_decl aux ctx c
-  in aux ctx c; !ctx'
-
-let infer_hole (f : pre_simplification_fun) (env : Environ.env) (evd : Evd.evar_map ref)
-  (gl : goal) : open_term_with_context =
-  let term = f env evd gl in
-  let ctx' = infer_hole_context env evd gl term in
-  let ty = infer_hole_type env evd gl ctx' term in
-    (ctx', ty), term
-
-(* Add a typing check. *)
-let safe_term (env : Environ.env) (evd : Evd.evar_map ref)
-  (((ctx, ty), f) : open_term_with_context) : open_term_with_context =
-  (ctx, ty), fun c ->
-    let () =
-      let env = Environ.push_rel_context ctx env in
-        Typing.check env evd c ty
-    in f c
+  let c = f tev in
+  let env = Environ.push_rel_context ctx env in
+  Typing.check env evd c ty;
+  let ty' = Evd.existential_value !evd (Term.destEvar ev_ty) in
+  let ev, _ = Term.destEvar tev in
+    (ctx', ty'), (ev, c)
 
 (* Build an open term by substituting the second term for the hole in the
  * first term. *)
-let compose_term
-  ((_, f1) : open_term_with_context)
-  ((gl2, f2) : open_term_with_context) : open_term_with_context =
-  gl2, fun c -> f1 (f2 c)
+let compose_term (evd : Evd.evar_map ref)
+  (((ctx1, _), (ev1, c1)) : open_term) ((gl2, (ev2, c2)) : open_term) : open_term =
+  (* Currently, [c2] is typed under the rel_context [ctx1]. We want
+     to assigne it to the evar [ev1], which means that we need to transpose
+     it to the named_context of this evar.
+     FIXME: is there any better way of doing this? *)
+  let subst, _ = Covering.named_of_rel_context ctx1 in
+  let c2 = Vars.substl subst c2 in
+  evd := Evd.define ev1 c2 !evd;
+  gl2, (ev2, c1)
 
 let safe_fun (f : simplification_fun)
-  (env : Environ.env) (evd : Evd.evar_map ref) (gl : goal) : open_term_with_context =
-    safe_term env evd (f env evd gl)
+  (env : Environ.env) (evd : Evd.evar_map ref) ((ctx, ty) : goal) : open_term =
+  let (_, (_, c)) as res = f env evd (ctx, ty) in
+  let env = Environ.push_rel_context ctx env in
+  Typing.check env evd c ty;
+  res
 
 (* Applies [g] to the goal, then [f]. *)
 let compose_fun (f : simplification_fun) (g : simplification_fun)
-  (env : Environ.env) (evd : Evd.evar_map ref) (gl : goal) : open_term_with_context =
-  let (gl, _) as term1 = g env evd gl in
-  let term2 = f env evd gl in
-    compose_term term1 term2
+  (env : Environ.env) (evd : Evd.evar_map ref) (gl : goal) : open_term =
+  let (gl', _) as t1 = g env evd gl in
+  let t2 = f env evd gl' in
+    compose_term evd t1 t2
 
 (* Check that the first hypothesis in the goal is an equality, and some
  * additional constraints if specified. Raise CannotSimplify if it's
  * not the case. Otherwise, return the goal decomposed in two types,
  * the Name of the equality, its arguments. *)
 let check_equality ?(equal_terms : bool = false)
-  ?(var_left : bool = false) ?(var_right : bool = false)
-  (env : Environ.env) (evd : Evd.evar_map ref) (ty : Term.types) :
+  ?(var_left : bool = false) ?(var_right : bool = false) (ty : Term.types) :
     ((Names.name * Term.types * Term.types) *
      (Term.types * Term.constr * Term.constr)) =
   let name, ty1, ty2 = try Term.destProd ty
@@ -314,8 +290,8 @@ let check_equality ?(equal_terms : bool = false)
        not a variable."));
   (name, ty1, ty2), (tA, tx, ty)
 
-let decompose_sigma (env : Environ.env) (evd : Evd.evar_map ref)
-  (t : Term.constr) : (Term.types * Term.constr * Term.constr * Term.constr) option =
+let decompose_sigma (t : Term.constr) :
+  (Term.types * Term.constr * Term.constr * Term.constr) option =
   try
     let f, args = Term.destApp t in
     let constr = Univ.out_punivs (Term.destConstruct f) in
@@ -334,123 +310,79 @@ let decompose_sigma (env : Environ.env) (evd : Evd.evar_map ref)
  * even an equality. *)
 let remove_sigma (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : open_term =
-  let (name, ty1, ty2), (_, t1, t2) = check_equality env evd ty in
-  match decompose_sigma env evd t1, decompose_sigma env evd t2 with
-  | Some (tA, tB, tt, tp), Some (_, _, tu, tq) ->
-      (* Determine the degree of dependency. *)
-      if Vars.noccurn 1 ty2 then begin
-        (* No dependency in the goal, but maybe there is a dependency in
-           the pair itself. *)
-        try
-          let name', _, tBbody = Term.destLambda tB in
-          if Vars.noccurn 1 tBbody then
-            (* No dependency whatsoever. *)
-            let tsimpl_sigma = Builder.simpl_sigma evd in
-            let tP = Termops.pop tBbody in
-            let tB = Termops.pop ty2 in
-            fun c -> Constr.mkApp
-              (tsimpl_sigma, [| tA; tP; tB; tt; tu; tp; tq; c |])
-          else raise Term.DestKO
-        with
-        | Term.DestKO ->
-            (* Dependency in the pair, but not in the goal. *)
-            let tsimpl_sigma = Builder.simpl_sigma_dep evd in
-            let tP = tB in
-            let tB = Termops.pop ty2 in
-            fun c -> Constr.mkApp
-              (tsimpl_sigma, [| tA; tP; tB; tt; tu; tp; tq; c |])
-      end else
-        (* We assume full dependency. We could add one more special case,
-         * but we don't for now. *)
-        let tsimpl_sigma = Builder.simpl_sigma_dep_dep evd in
-        let tP = tB in
-        let tB = Constr.mkLambda (name, ty1, ty2) in
-        fun c -> Constr.mkApp
-          (tsimpl_sigma, [| tA; tP; tt; tu; tp; tq; tB; c |])
-  | _, _ -> fun c -> c
-let remove_sigma = infer_hole remove_sigma
-
-(* This function is not accessible by the user for now. It is used to
- * reduce the application of some constants to [eq_refl] in the
- * goal. *)
-let reduce_eq_refl (env : Environ.env) (evd : Evd.evar_map ref)
-  ((ctx, ty) : goal) : open_term_with_context =
-  (* Will throw [Term.DestKO] if [t] is not [eq_refl]. *)
-  let is_eq_refl t =
-    let g, _ = Term.destApp t in
-    let constr = Univ.out_punivs (Term.destConstruct g) in
-    if not (Names.eq_constructor constr (Lazy.force EqRefs.eq_refl)) then
-      raise Term.DestKO
-  in
-  (* This list contains pairs of a reference to a lemma, and
-   * a pair made of an index and a function. The index corresponds
-   * to the argument that has to be [eq_refl] for the reduction
-   * to be doable. The function takes the arguments and returns
-   * a new term to replace the application of the lemma to
-   * [eq_refl]. This function can raise [Term.DestKO] if the
-   * arguments still do not have correct values. *)
-  let changes = [
-    Lazy.force EqRefs.eq_rect, (5, fun args -> args.(3));
-    Lazy.force EqRefs.eq_rect_r, (5, fun args -> args.(3));
-    Lazy.force EqRefs.pack_sigma_eq, (6, fun args ->
-      is_eq_refl args.(7);
-      let sigma = Builder.sigma evd in
-      let sigmaI = Builder.sigmaI evd in
-      let eq_refl = Builder.eq_refl evd in
-      let ty = Term.mkApp (sigma, [| args.(0); args.(1) |]) in
-      let tx = Term.mkApp (sigmaI, [| args.(0); args.(1); args.(2); args.(4) |]) in
-      Term.mkApp (eq_refl, [| ty; tx |]))
-  ] in
-  (* We scan recursively every subterm of the goal type and look for one
-   * of the above-defined reductions. *)
-  let rec change c =
-    try
-      let t, args = Term.destApp c in
-      let f = Univ.out_punivs (Term.destConst t) in
-      let arg, change_fun = CList.assoc_f Names.Constant.equal f changes in
-      (* We want to check that [args.(arg)] is indeed [eq_refl]. *)
-      is_eq_refl args.(arg);
-      Term.map_constr change (change_fun args)
-    with Not_found | Term.DestKO -> Term.map_constr change c
-  in (ctx, change ty), fun c -> c
+  let (name, ty1, ty2), (_, t1, t2) = check_equality ty in
+  let f =
+    match decompose_sigma t1, decompose_sigma t2 with
+    | Some (tA, tB, tt, tp), Some (_, _, tu, tq) ->
+        (* Determine the degree of dependency. *)
+        if Vars.noccurn 1 ty2 then begin
+          (* No dependency in the goal, but maybe there is a dependency in
+             the pair itself. *)
+          try
+            let name', _, tBbody = Term.destLambda tB in
+            if Vars.noccurn 1 tBbody then
+              (* No dependency whatsoever. *)
+              let tsimpl_sigma = Builder.simpl_sigma evd in
+              let tP = Termops.pop tBbody in
+              let tB = Termops.pop ty2 in
+              fun c -> Constr.mkApp
+                (tsimpl_sigma, [| tA; tP; tB; tt; tu; tp; tq; c |])
+            else raise Term.DestKO
+          with
+          | Term.DestKO ->
+              (* Dependency in the pair, but not in the goal. *)
+              let tsimpl_sigma = Builder.simpl_sigma_dep evd in
+              let tP = tB in
+              let tB = Termops.pop ty2 in
+              fun c -> Constr.mkApp
+                (tsimpl_sigma, [| tA; tP; tB; tt; tu; tp; tq; c |])
+        end else
+          (* We assume full dependency. We could add one more special case,
+           * but we don't for now. *)
+          let tsimpl_sigma = Builder.simpl_sigma_dep_dep evd in
+          let tP = tB in
+          let tB = Constr.mkLambda (name, ty1, ty2) in
+          fun c -> Constr.mkApp
+            (tsimpl_sigma, [| tA; tP; tt; tu; tp; tq; tB; c |])
+    | _, _ -> fun c -> c
+  in build_term env evd (ctx, ty) ctx f
 
 let deletion ~(force:bool) (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : open_term =
-  let (name, ty1, ty2), (tA, tx, _) =
-    check_equality ~equal_terms:true env evd ty in
-  if Vars.noccurn 1 ty2 then
-    (* The goal does not depend on the equality, we can just eliminate it. *)
-    fun c -> Constr.mkLambda (name, ty1, Vars.lift 1 c)
-  else
-    let tB = Constr.mkLambda (name, ty1, ty2) in
-    if force then
-      (* The user wants to use K directly. *)
-      let tsimpl_K = Builder.simpl_K evd in
-      fun c ->
-        Constr.mkApp (tsimpl_K, [| tA; tx; tB; c |])
+  let (name, ty1, ty2), (tA, tx, _) = check_equality ~equal_terms:true ty in
+  let f =
+    if Vars.noccurn 1 ty2 then
+      (* The goal does not depend on the equality, we can just eliminate it. *)
+      fun c -> Constr.mkLambda (name, ty1, Vars.lift 1 c)
     else
-      (* We will try to find an instance of K for the type [A]. *)
-      let tsimpl_K_dec = Builder.simpl_K_dec evd in
-      let eqdec_ty = Constr.mkApp (Builder.eq_dec evd, [| tA |]) in
-      let tdec =
-        let env = Environ.push_rel_context ctx env in
-        try
-          Evarutil.evd_comb1
-            (Typeclasses.resolve_one_typeclass env) evd eqdec_ty
-        with Not_found ->
-          raise (CannotSimplify (str
-            "[deletion] Cannot simplify without K on type " ++
-            Printer.pr_constr_env env !evd tA))
-      in fun c ->
-          Constr.mkApp (tsimpl_K_dec, [| tA; tdec; tx; tB; c |])
-let deletion ~force = infer_hole (deletion ~force)
+      let tB = Constr.mkLambda (name, ty1, ty2) in
+      if force then
+        (* The user wants to use K directly. *)
+        let tsimpl_K = Builder.simpl_K evd in
+        fun c ->
+          Constr.mkApp (tsimpl_K, [| tA; tx; tB; c |])
+      else
+        (* We will try to find an instance of K for the type [A]. *)
+        let tsimpl_K_dec = Builder.simpl_K_dec evd in
+        let eqdec_ty = Constr.mkApp (Builder.eq_dec evd, [| tA |]) in
+        let tdec =
+          let env = Environ.push_rel_context ctx env in
+          try
+            Evarutil.evd_comb1
+              (Typeclasses.resolve_one_typeclass env) evd eqdec_ty
+          with Not_found ->
+            raise (CannotSimplify (str
+              "[deletion] Cannot simplify without K on type " ++
+              Printer.pr_constr_env env !evd tA))
+        in fun c ->
+            Constr.mkApp (tsimpl_K_dec, [| tA; tdec; tx; tB; c |])
+  in build_term env evd (ctx, ty) ctx f
 
 let solution ~(dir:direction) (env : Environ.env) (evd : Evd.evar_map ref)
-  ((ctx, ty) as gl : goal) : open_term_with_context =
+  ((ctx, ty) : goal) : open_term =
   let var_left = match dir with Left -> true | Right -> false in
   let var_right = not var_left in
-  let (name, ty1, ty2), (tA, tx, tz) =
-    check_equality ~var_left ~var_right env evd ty in
+  let (name, ty1, ty2), (tA, tx, tz) = check_equality ~var_left ~var_right ty in
   let trel, term =
     if var_left then tx, tz
     else tz, tx
@@ -504,7 +436,7 @@ let solution ~(dir:direction) (env : Environ.env) (evd : Evd.evar_map ref)
   (* [ctx''] is just [ctx'] where we replaced the substituted variable. *)
   let ctx'' = Covering.subst_in_ctx rel' term' ctx' in
   let after'', _ = CList.chop (pred rel') ctx'' in
-  let res = fun c ->
+  let f = fun c ->
       (* [c] is a term in the context [ctx'']. *)
       let c = Term.it_mkLambda_or_LetIn c after'' in
       (* [c] is a term in the context [before']. *)
@@ -525,23 +457,20 @@ let solution ~(dir:direction) (env : Environ.env) (evd : Evd.evar_map ref)
       let c = Constr.mkLambda (name, ty1', c) in
       (* And now we recover a term in the context [ctx]. *)
         Covering.mapping_constr rev_subst c
-  in
-  let ty'' = infer_hole_type env evd gl ctx'' res in
-    (ctx'', ty''), res
+  in build_term env evd (ctx, ty) ctx'' f
 
 let noConfusion (env : Environ.env) (evd : Evd.evar_map ref)
-  ((ctx, ty) : goal) : open_term_with_context =
+  ((ctx, ty) : goal) : open_term=
   failwith "[noConfusion] is not implemented!"
 
 let noCycle (env : Environ.env) (evd : Evd.evar_map ref)
-  ((ctx, ty) : goal) : open_term_with_context =
+  ((ctx, ty) : goal) : open_term=
   failwith "[noCycle] is not implemented!"
 
-let identity (env : Environ.env) (evd : Evd.evar_map ref)
-  (gl : goal) : open_term_with_context =
-  gl, fun c -> c
+let identity (env : Environ.env) (evd : Evd.evar_map ref) (gl : goal) : open_term =
+  build_term env evd gl (fst gl) (fun c -> c)
 
-let execute_step : simplification_step -> simplification_fun = function
+let raw_execute_step : simplification_step -> simplification_fun = function
   | Deletion force -> deletion ~force
   | Solution (Some dir) -> solution ~dir:dir
   | NoConfusion -> noConfusion
@@ -549,9 +478,36 @@ let execute_step : simplification_step -> simplification_fun = function
   (* We assume the direction has been inferred at this point. *)
   | Solution None -> assert false
 
-let execute_step step = safe_fun (execute_step step)
-let execute_step step = compose_fun (execute_step step) remove_sigma
+let with_retry (f : simplification_fun) (env : Environ.env)
+  (evd : Evd.evar_map ref) ((ctx, ty) : goal) : open_term =
+  try
+    (* Be careful with the [evar_map] management. *)
+    let evd' = ref !evd in
+    let res = f env evd' (ctx, ty) in
+    evd := !evd'; res
+  with CannotSimplify _ ->
+    let reduce c =
+      let env = Environ.push_rel_context ctx env in
+        Tacred.hnf_constr env !evd c
+    in
+  (* Try to head-reduce the goal and reapply f. *) 
+    let ty = reduce ty in
+    let ((name, _, ty2), (tA, t1, t2)) = check_equality ty in
+    let t1 = reduce t1 in
+    let t2 = reduce t2 in
+    let ty1 = Constr.mkApp (Builder.eq evd, [| tA; t1; t2 |]) in
+    let ty = Constr.mkProd (name, ty1, ty2) in
+      f env evd (ctx, ty)
+
+let execute_step step =
+  let f = raw_execute_step step in
+  let f = safe_fun f in
+  let f = compose_fun f remove_sigma in
+  let f = with_retry f in
+    f
+(*
 let execute_step step = compose_fun reduce_eq_refl (execute_step step)
+*)
 
 let infer_step ~(isSol:bool) (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : simplification_step =
@@ -592,11 +548,7 @@ let simplify_tac (rules : simplification_rules) : unit Proofview.tactic =
      * context [ctx']. *)
     Proofview.Refine.refine ~unsafe:false (fun evd ->
       let evd = ref evd in
-      let (ctx', ty'), term = simplify rules env evd (ctx, ty) in
-      let c = let env = Environ.push_rel_context ctx' env in
-          Evarutil.e_new_evar ~principal:true env evd ty'
-      in
-      let c = term c in
+      let _, (_, c) = simplify rules env evd (ctx, ty) in
       let c = Vars.substl rev_subst c in
         !evd, c)
   end

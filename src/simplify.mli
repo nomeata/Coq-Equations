@@ -12,13 +12,17 @@ type simplification_rules = (Loc.t * simplification_step option) list
 
 type goal = Context.rel_context * Term.types
 
-type open_term = Term.constr -> Term.constr
-type open_term_with_context = goal * open_term
+(* A [pre_open_term] is a term along with an [evar] representing a hole
+ * in the term. *)
+type pre_open_term = Evd.evar * Term.constr
+(* The [goal] corresponds to the context and type of the evar in the
+ * [pre_open_term]. *)
+type open_term = goal * pre_open_term
 
 exception CannotSimplify of Pp.std_ppcmds
 
 type simplification_fun =
-  Environ.env -> Evd.evar_map ref -> goal -> open_term_with_context
+  Environ.env -> Evd.evar_map ref -> goal -> open_term
 
 (* Auxiliary functions. *)
 
@@ -31,10 +35,7 @@ val strengthen :
   Context.rel_context -> int -> ?rels:Int.Set.t -> Term.constr ->
   Covering.context_map * Covering.context_map
 
-val safe_term : Environ.env -> Evd.evar_map ref ->
-  open_term_with_context -> open_term_with_context
-val compose_term : open_term_with_context -> open_term_with_context ->
-  open_term_with_context
+val compose_term : Evd.evar_map ref -> open_term -> open_term -> open_term
 val safe_fun : simplification_fun -> simplification_fun
 val compose_fun : simplification_fun -> simplification_fun -> simplification_fun
 
