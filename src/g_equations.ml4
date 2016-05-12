@@ -468,10 +468,15 @@ GEXTEND Gram
   ;
 
   simplification_rule:
-    [ [ "-" -> Some (Simplify.Deletion false)
-      | "-!" -> Some (Simplify.Deletion true)
-      | dir = direction -> Some (Simplify.Solution dir)
-      | "?" -> None
+    [ [ step = simplification_step -> Simplify.Step step
+      | "?" -> Simplify.Infer_one
+      | "*" -> Simplify.Infer_many
+    ] ];
+
+  simplification_step :
+    [ [ "-" -> Simplify.Deletion false
+      | "-!" -> Simplify.Deletion true
+      | dir = direction -> Simplify.Solution dir
     ] ];
 
   direction:

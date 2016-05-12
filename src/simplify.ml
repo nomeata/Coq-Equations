@@ -134,8 +134,11 @@ type simplification_step =
   | NoConfusion
   | NoCycle (* TODO: NoCycle should probably take a direction too. *)
 
-(* None = infer it. *)
-type simplification_rules = (Loc.t * simplification_step option) list
+type simplification_rule =
+    Step of simplification_step
+  | Infer_one
+  | Infer_many
+type simplification_rules = (Loc.t * simplification_rule) list
 
 type goal = Context.rel_context * Term.types
 
@@ -548,28 +551,51 @@ let infer_step ~(isSol:bool) (env : Environ.env) (evd : Evd.evar_map ref)
 
 (* For simplicity, [simplify_one_aux] will assume that the first part of
    the goal is a simple equality, never an equality between dependent
-   pairs. *)
-let simplify_one_aux : simplification_step option -> simplification_fun = function
-  | None -> fun env evd gl ->
+   pairs.
+   It also implies that any [Infer_many] has been removed beforehand. *)
+let simplify_one_aux : simplification_rule -> simplification_fun = function
+  | Infer_one -> fun env evd gl ->
       let step = infer_step ~isSol:false env evd gl in
         execute_step step env evd gl
-  | Some (Solution None) -> fun env evd gl ->
+  | Step (Solution None) -> fun env evd gl ->
       let step = infer_step ~isSol:true env evd gl in
         execute_step step env evd gl
-  | Some step -> execute_step step
+  | Step step -> execute_step step
+  | Infer_many -> assert false
 
-let simplify_one ((loc, rule) : Loc.t * simplification_step option) :
+let simplify_one_rule (rule : simplification_rule) : simplification_fun =
+  let f = simplify_one_aux rule in
+  let f = safe_fun f in
+  let f = compose_fun f remove_sigma in
+  let f = with_retry f in
+    f
+
+let expand_many env evd (ty : Term.types) rule : simplification_rules =
+  (* FIXME: maybe it's too brutal/expensive? *)
+  let ty = Tacred.compute env !evd ty in
+  let _, (ty, _, _) = check_equality ty in
+  let rec aux ty acc =
+    let f, args = Term.decompose_appvect ty in
+    try
+      let ind = Univ.out_punivs (Term.destInd f) in
+      if not (Names.eq_ind ind (Lazy.force SigmaRefs.sigma)) then raise Term.DestKO;
+      aux args.(0) (rule :: acc)
+    with Term.DestKO -> acc
+  in aux ty [rule]
+
+let rec simplify_one ((loc, rule) : Loc.t * simplification_rule) :
   simplification_fun =
-    let f = simplify_one_aux rule in
-    let f = safe_fun f in
-    let f = compose_fun f remove_sigma in
-    let f = with_retry f in
-    fun env evd gl ->
+  let f =
+    match rule with
+    | Infer_many -> fun env evd gl ->
+        simplify (expand_many env evd (snd gl) (loc, Infer_one)) env evd gl
+    | _ -> simplify_one_rule rule
+  in fun env evd gl ->
     try f env evd gl
     with CannotSimplify err ->
       Errors.user_err_loc (loc, "Equations.Simplify", err)
 
-let simplify (rules : simplification_rules) : simplification_fun =
+and simplify (rules : simplification_rules) : simplification_fun =
   let funs = List.rev_map simplify_one rules in
     List.fold_left compose_fun identity funs
 
@@ -606,10 +632,11 @@ let pr_simplification_step : simplification_step -> Pp.std_ppcmds = function
   | NoConfusion -> str "NoConfusion"
   | NoCycle -> str "NoCycle"
 
-let pr_simplification_rule ((_, rule) : Loc.t * simplification_step option) :
+let pr_simplification_rule ((_, rule) : Loc.t * simplification_rule) :
   Pp.std_ppcmds = match rule with
-  | None -> str "?"
-  | Some step -> pr_simplification_step step
+  | Infer_one -> str "?"
+  | Infer_many -> str "*"
+  | Step step -> pr_simplification_step step
 
 let pr_simplification_rules : simplification_rules -> Pp.std_ppcmds =
   prlist_with_sep spc pr_simplification_rule

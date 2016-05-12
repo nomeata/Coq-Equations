@@ -7,8 +7,11 @@ type simplification_step =
   | NoConfusion
   | NoCycle
 
-(* None = infer it. *)
-type simplification_rules = (Loc.t * simplification_step option) list
+type simplification_rule =
+    Step of simplification_step
+  | Infer_one
+  | Infer_many
+type simplification_rules = (Loc.t * simplification_rule) list
 
 type goal = Context.rel_context * Term.types
 
