@@ -132,7 +132,7 @@ type simplification_step =
     Deletion of bool (* Force the use of K? *)
   | Solution of direction option (* None = infer it *)
   | NoConfusion
-  | NoCycle
+  | NoCycle (* TODO: NoCycle should probably take a direction too. *)
 
 (* None = infer it. *)
 type simplification_rules = (Loc.t * simplification_step option) list
@@ -299,6 +299,27 @@ let decompose_sigma (t : Term.constr) :
     else Some (args.(0), args.(1), args.(2), args.(3))
   with
   | Term.DestKO -> None
+
+let with_retry (f : simplification_fun) (env : Environ.env)
+  (evd : Evd.evar_map ref) ((ctx, ty) : goal) : open_term =
+  try
+    (* Be careful with the [evar_map] management. *)
+    let evd' = ref !evd in
+    let res = f env evd' (ctx, ty) in
+    evd := !evd'; res
+  with CannotSimplify _ ->
+    let reduce c =
+      let env = Environ.push_rel_context ctx env in
+        Tacred.hnf_constr env !evd c
+    in
+  (* Try to head-reduce the goal and reapply f. *) 
+    let ty = reduce ty in
+    let ((name, _, ty2), (tA, t1, t2)) = check_equality ty in
+    let t1 = reduce t1 in
+    let t2 = reduce t2 in
+    let ty1 = Constr.mkApp (Builder.eq evd, [| tA; t1; t2 |]) in
+    let ty = Constr.mkProd (name, ty1, ty2) in
+      f env evd (ctx, ty)
 
 (* Simplification functions to handle each step. *)
 (* Any of these can throw a CannotSimplify exception which explains why the
@@ -470,7 +491,7 @@ let noCycle (env : Environ.env) (evd : Evd.evar_map ref)
 let identity (env : Environ.env) (evd : Evd.evar_map ref) (gl : goal) : open_term =
   build_term env evd gl (fst gl) (fun c -> c)
 
-let raw_execute_step : simplification_step -> simplification_fun = function
+let execute_step : simplification_step -> simplification_fun = function
   | Deletion force -> deletion ~force
   | Solution (Some dir) -> solution ~dir:dir
   | NoConfusion -> noConfusion
@@ -478,41 +499,56 @@ let raw_execute_step : simplification_step -> simplification_fun = function
   (* We assume the direction has been inferred at this point. *)
   | Solution None -> assert false
 
-let with_retry (f : simplification_fun) (env : Environ.env)
-  (evd : Evd.evar_map ref) ((ctx, ty) : goal) : open_term =
-  try
-    (* Be careful with the [evar_map] management. *)
-    let evd' = ref !evd in
-    let res = f env evd' (ctx, ty) in
-    evd := !evd'; res
-  with CannotSimplify _ ->
-    let reduce c =
-      let env = Environ.push_rel_context ctx env in
-        Tacred.hnf_constr env !evd c
-    in
-  (* Try to head-reduce the goal and reapply f. *) 
-    let ty = reduce ty in
-    let ((name, _, ty2), (tA, t1, t2)) = check_equality ty in
-    let t1 = reduce t1 in
-    let t2 = reduce t2 in
-    let ty1 = Constr.mkApp (Builder.eq evd, [| tA; t1; t2 |]) in
-    let ty = Constr.mkProd (name, ty1, ty2) in
-      f env evd (ctx, ty)
-
-let execute_step step =
-  let f = raw_execute_step step in
-  let f = safe_fun f in
-  let f = compose_fun f remove_sigma in
-  let f = with_retry f in
-    f
-(*
-let execute_step step = compose_fun reduce_eq_refl (execute_step step)
-*)
-
 let infer_step ~(isSol:bool) (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : simplification_step =
-  failwith "[infer_step] is not implemented!"
+  (* First things first, we need to destruct the equality at the head
+     to analyze it. *)
+  let (name, tyeq, tyrest), (tA, tu, tv) = check_equality ty in
+  (* If the user wants a solution, we need to respect his wishes. *)
+  if isSol then
+    if Term.isRel tu then Solution (Some Right)
+    else if Term.isRel tv then Solution (Some Left)
+    else raise (CannotSimplify (str "Neither side of the equality is a variable."))
+  else begin
+    if Constr.equal tu tv then Deletion false (* Never force K. *)
+    else
+    let check_occur trel term =
+      let rel = Term.destRel trel in
+        not (Int.Set.mem rel (Covering.dependencies_of_term env !evd ctx term rel))
+    in
+    if Term.isRel tu && check_occur tu tv then Solution (Some Right)
+    else if Term.isRel tv && check_occur tv tu then Solution (Some Left)
+    else
+    let check_construct t =
+      try
+        let f, _ = Term.decompose_app t in
+          Term.isConstruct f
+      with Term.DestKO -> false
+    in
+    if check_construct tu && check_construct tv then NoConfusion
+    else
+    (* Check if [u] occurs in [t] under only constructors. *)
+    (* For now we don't care about the type of these constructors. *)
+    (* Note that we also don't need to care about binders, since we can
+       only go through constructors and nothing else. *)
+    let check_occur t u =
+      let eq t = fst (Universes.eq_constr_universes t u) in
+      let rec aux t =
+        if eq t then raise Termops.Occur;
+        let f, args = Term.decompose_app t in
+        if Term.isConstruct f then
+          CList.iter aux args
+      in try aux t; false
+      with Termops.Occur -> true
+    in
+    if check_occur tu tv || check_occur tv tu then NoCycle
+    else
+      raise (CannotSimplify (str "Could not infer a simplification step."))
+  end
 
+(* For simplicity, [simplify_one_aux] will assume that the first part of
+   the goal is a simple equality, never an equality between dependent
+   pairs. *)
 let simplify_one_aux : simplification_step option -> simplification_fun = function
   | None -> fun env evd gl ->
       let step = infer_step ~isSol:false env evd gl in
@@ -523,8 +559,13 @@ let simplify_one_aux : simplification_step option -> simplification_fun = functi
   | Some step -> execute_step step
 
 let simplify_one ((loc, rule) : Loc.t * simplification_step option) :
-  simplification_fun = fun env evd gl ->
-    try simplify_one_aux rule env evd gl
+  simplification_fun =
+    let f = simplify_one_aux rule in
+    let f = safe_fun f in
+    let f = compose_fun f remove_sigma in
+    let f = with_retry f in
+    fun env evd gl ->
+    try f env evd gl
     with CannotSimplify err ->
       Errors.user_err_loc (loc, "Equations.Simplify", err)
 
