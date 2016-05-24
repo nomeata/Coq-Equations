@@ -139,15 +139,15 @@ type direction = Left | Right
 
 type simplification_step =
     Deletion of bool (* Force the use of K? *)
-  | Solution of direction option (* None = infer it *)
-  | NoConfusion
+  | Solution of direction
+  | NoConfusion of simplification_rules
   | NoCycle (* TODO: NoCycle should probably take a direction too. *)
-
-type simplification_rule =
+and simplification_rule =
     Step of simplification_step
   | Infer_one
+  | Infer_direction
   | Infer_many
-type simplification_rules = (Loc.t * simplification_rule) list
+and simplification_rules = (Loc.t * simplification_rule) list
 
 type goal = Context.rel_context * Term.types
 
@@ -536,23 +536,19 @@ let noCycle (env : Environ.env) (evd : Evd.evar_map ref)
 let identity (env : Environ.env) (evd : Evd.evar_map ref) (gl : goal) : open_term =
   build_term env evd gl (fst gl) (fun c -> c)
 
-let execute_step : simplification_step -> simplification_fun = function
-  | Deletion force -> deletion ~force
-  | Solution (Some dir) -> solution ~dir:dir
-  | NoConfusion -> noConfusion
-  | NoCycle -> noCycle
-  (* We assume the direction has been inferred at this point. *)
-  | Solution None -> assert false
 
-let infer_step ~(isSol:bool) (env : Environ.env) (evd : Evd.evar_map ref)
+(* Inference mechanism. *)
+
+let infer_step ~(loc:Loc.t) ~(isSol:bool)
+  (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : simplification_step =
   (* First things first, we need to destruct the equality at the head
      to analyze it. *)
   let (name, tyeq, tyrest), (tA, tu, tv) = check_equality ty in
   (* If the user wants a solution, we need to respect his wishes. *)
   if isSol then
-    if Term.isRel tu then Solution (Some Right)
-    else if Term.isRel tv then Solution (Some Left)
+    if Term.isRel tu then Solution Right
+    else if Term.isRel tv then Solution Left
     else raise (CannotSimplify (str "Neither side of the equality is a variable."))
   else begin
     if Constr.equal tu tv then Deletion false (* Never force K. *)
@@ -561,14 +557,15 @@ let infer_step ~(isSol:bool) (env : Environ.env) (evd : Evd.evar_map ref)
       let rel = Term.destRel trel in
         not (Int.Set.mem rel (Covering.dependencies_of_term env !evd ctx term rel))
     in
-    if Term.isRel tu && check_occur tu tv then Solution (Some Right)
-    else if Term.isRel tv && check_occur tv tu then Solution (Some Left)
+    if Term.isRel tu && check_occur tu tv then Solution Right
+    else if Term.isRel tv && check_occur tv tu then Solution Left
     else
     let check_construct t =
         let f, _ = Term.decompose_app t in
           Term.isConstruct f
     in
-    if check_construct tu && check_construct tv then NoConfusion
+    if check_construct tu && check_construct tv then
+      NoConfusion [loc, Infer_many]
     else
     (* Check if [u] occurs in [t] under only constructors. *)
     (* For now we don't care about the type of these constructors. *)
@@ -589,28 +586,7 @@ let infer_step ~(isSol:bool) (env : Environ.env) (evd : Evd.evar_map ref)
       raise (CannotSimplify (str "Could not infer a simplification step."))
   end
 
-(* For simplicity, [simplify_one_aux] will assume that the first part of
-   the goal is a simple equality, never an equality between dependent
-   pairs.
-   It also implies that any [Infer_many] has been removed beforehand. *)
-let simplify_one_aux : simplification_rule -> simplification_fun = function
-  | Infer_one -> fun env evd gl ->
-      let step = infer_step ~isSol:false env evd gl in
-        execute_step step env evd gl
-  | Step (Solution None) -> fun env evd gl ->
-      let step = infer_step ~isSol:true env evd gl in
-        execute_step step env evd gl
-  | Step step -> execute_step step
-  | Infer_many -> assert false
-
-let simplify_one_rule (rule : simplification_rule) : simplification_fun =
-  let f = simplify_one_aux rule in
-  let f = safe_fun f in
-  let f = compose_fun f remove_sigma in
-  let f = with_retry f in
-    f
-
-let expand_many env evd (ty : Term.types) rule : simplification_rules =
+let expand_many rule env evd ((_, ty) : goal) : simplification_rules =
   (* FIXME: maybe it's too brutal/expensive? *)
   let ty = Tacred.compute env !evd ty in
   let _, (ty, _, _) = check_equality ty in
@@ -623,17 +599,37 @@ let expand_many env evd (ty : Term.types) rule : simplification_rules =
     with Term.DestKO -> acc
   in aux ty [rule]
 
-let rec simplify_one ((loc, rule) : Loc.t * simplification_rule) :
+
+(* Execution machinery. *)
+
+let rec execute_step : simplification_step -> simplification_fun = function
+  | Deletion force -> deletion ~force
+  | Solution dir -> solution ~dir:dir
+  | NoConfusion rules -> compose_fun (simplify rules) noConfusion
+  | NoCycle -> noCycle
+
+and simplify_one ((loc, rule) : Loc.t * simplification_rule) :
   simplification_fun =
-  let f =
-    match rule with
-    | Infer_many -> fun env evd gl ->
-        simplify (expand_many env evd (snd gl) (loc, Infer_one)) env evd gl
-    | _ -> simplify_one_rule rule
-  in fun env evd gl ->
-    try f env evd gl
-    with CannotSimplify err ->
-      Errors.user_err_loc (loc, "Equations.Simplify", err)
+  let wrap get_step =
+    let f = fun env evd gl ->
+      let step = get_step env evd gl in
+        execute_step step env evd gl
+    in
+    let f = safe_fun f in
+    let f = compose_fun f remove_sigma in
+    let f = with_retry f in
+    fun env evd gl ->
+      try f env evd gl
+      with CannotSimplify err ->
+        Errors.user_err_loc (loc, "Equations.Simplify", err)
+  in
+  match rule with
+  | Infer_many -> fun env evd gl ->
+      let rules = expand_many (loc, Infer_one) env evd gl in
+        simplify rules env evd gl
+  | Step step -> wrap (fun _ _ _ -> step)
+  | Infer_one -> wrap (infer_step ~loc ~isSol:false)
+  | Infer_direction -> wrap (infer_step ~loc ~isSol:true)
 
 and simplify (rules : simplification_rules) : simplification_fun =
   let funs = List.rev_map simplify_one rules in
@@ -666,15 +662,15 @@ let simplify_tac (rules : simplification_rules) : unit Proofview.tactic =
 let pr_simplification_step : simplification_step -> Pp.std_ppcmds = function
   | Deletion false -> str "-"
   | Deletion true -> str "-!"
-  | Solution (Some Left) -> str "->"
-  | Solution (Some Right) -> str "<-"
-  | Solution None -> str "<->"
-  | NoConfusion -> str "NoConfusion"
+  | Solution (Left) -> str "->"
+  | Solution (Right) -> str "<-"
+  | NoConfusion rules -> str "$"
   | NoCycle -> str "NoCycle"
 
 let pr_simplification_rule ((_, rule) : Loc.t * simplification_rule) :
   Pp.std_ppcmds = match rule with
   | Infer_one -> str "?"
+  | Infer_direction -> str "<->"
   | Infer_many -> str "*"
   | Step step -> pr_simplification_step step
 

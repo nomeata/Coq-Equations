@@ -3,15 +3,15 @@ type direction = Left | Right
 
 type simplification_step =
     Deletion of bool (* Force the use of K? *)
-  | Solution of direction option (* None = infer it *)
-  | NoConfusion
+  | Solution of direction
+  | NoConfusion of simplification_rules
   | NoCycle
-
-type simplification_rule =
+and simplification_rule =
     Step of simplification_step
   | Infer_one
+  | Infer_direction
   | Infer_many
-type simplification_rules = (Loc.t * simplification_rule) list
+and simplification_rules = (Loc.t * simplification_rule) list
 
 type goal = Context.rel_context * Term.types
 
@@ -59,7 +59,8 @@ val identity : simplification_fun
 val execute_step : simplification_step -> simplification_fun
 
 val infer_step :
-  isSol:bool -> Environ.env -> Evd.evar_map ref -> goal -> simplification_step
+  loc:Loc.t -> isSol:bool -> Environ.env -> Evd.evar_map ref ->
+  goal -> simplification_step
 
 val simplify : simplification_rules -> simplification_fun
 

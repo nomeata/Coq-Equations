@@ -470,20 +470,20 @@ GEXTEND Gram
   simplification_rule:
     [ [ step = simplification_step -> Simplify.Step step
       | "?" -> Simplify.Infer_one
+      | "<->" -> Simplify.Infer_direction
       | "*" -> Simplify.Infer_many
     ] ];
 
   simplification_step :
     [ [ "-" -> Simplify.Deletion false
       | "-!" -> Simplify.Deletion true
-      | "$" -> Simplify.NoConfusion
+      | "$" -> Simplify.NoConfusion []
       | dir = direction -> Simplify.Solution dir
     ] ];
 
   direction:
-    [ [ "->" -> Some Simplify.Left
-      | "<-" -> Some Simplify.Right
-      | "<->" -> None
+    [ [ "->" -> Simplify.Left
+      | "<-" -> Simplify.Right
     ] ];
 END
 
