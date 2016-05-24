@@ -478,6 +478,8 @@ GEXTEND Gram
     [ [ "-" -> Simplify.Deletion false
       | "-!" -> Simplify.Deletion true
       | "$" -> Simplify.NoConfusion []
+      | "$"; "{"; rules = g_simplification_rules; "}" ->
+          Simplify.NoConfusion rules
       | dir = direction -> Simplify.Solution dir
     ] ];
 
