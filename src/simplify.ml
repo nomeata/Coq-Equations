@@ -246,8 +246,7 @@ let compose_term (evd : Evd.evar_map ref)
   (((ctx1, _), (ev1, c1)) : open_term) ((gl2, (ev2, c2)) : open_term) : open_term =
   (* Currently, [c2] is typed under the rel_context [ctx1]. We want
      to assigne it to the evar [ev1], which means that we need to transpose
-     it to the named_context of this evar.
-     FIXME: is there any better way of doing this? *)
+     it to the named_context of this evar. *)
   let subst, _ = Covering.named_of_rel_context ctx1 in
   let c2 = Vars.substl subst c2 in
   evd := Evd.define ev1 c2 !evd;
@@ -330,8 +329,6 @@ let with_retry (f : simplification_fun) (env : Environ.env)
     let ty1 = reduce ty1 in
     let ty = Constr.mkProd (name, ty1, ty2) in
     (* If the head is an equality, reduce it. *)
-    (* TODO Is this necessary? *)
-    (*
     let ty = try
       let ((name, _, ty2), (tA, t1, t2)) = check_equality ty in
       let t1 = reduce t1 in
@@ -340,7 +337,6 @@ let with_retry (f : simplification_fun) (env : Environ.env)
         Constr.mkProd (name, ty1, ty2)
       with CannotSimplify _ -> ty
     in
-    *)
       f env evd (ctx, ty)
 
 (* Simplification functions to handle each step. *)
