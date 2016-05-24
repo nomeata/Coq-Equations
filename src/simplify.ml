@@ -606,6 +606,12 @@ let rec execute_step : simplification_step -> simplification_fun = function
 
 and simplify_one ((loc, rule) : Loc.t * simplification_rule) :
   simplification_fun =
+  let handle_error f =
+    fun env evd gl ->
+      try f env evd gl
+      with CannotSimplify err ->
+        Errors.user_err_loc (loc, "Equations.Simplify", err)
+  in
   let wrap get_step =
     let f = fun env evd gl ->
       let step = get_step env evd gl in
@@ -614,14 +620,11 @@ and simplify_one ((loc, rule) : Loc.t * simplification_rule) :
     let f = safe_fun f in
     let f = compose_fun f remove_sigma in
     let f = with_retry f in
-    fun env evd gl ->
-      try f env evd gl
-      with CannotSimplify err ->
-        Errors.user_err_loc (loc, "Equations.Simplify", err)
+      handle_error f
   in
   match rule with
   | Infer_many -> fun env evd gl ->
-      let rules = expand_many (loc, Infer_one) env evd gl in
+      let rules = handle_error (expand_many (loc, Infer_one)) env evd gl in
         simplify rules env evd gl
   | Step step -> wrap (fun _ _ _ -> step)
   | Infer_one -> wrap (infer_step ~loc ~isSol:false)
