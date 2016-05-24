@@ -476,6 +476,7 @@ GEXTEND Gram
   simplification_step :
     [ [ "-" -> Simplify.Deletion false
       | "-!" -> Simplify.Deletion true
+      | "$" -> Simplify.NoConfusion
       | dir = direction -> Simplify.Solution dir
     ] ];
 

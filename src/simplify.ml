@@ -16,6 +16,9 @@ module type EQREFS = sig
   val eq_rect_r : Names.constant Lazy.t
   (* Decidable equality typeclass. *)
   val eq_dec : Names.constant Lazy.t
+  (* NoConfusion. *)
+  val noConfusion : Names.inductive Lazy.t
+  val apply_noConfusion : Names.constant Lazy.t
   (* Simplification of dependent pairs. *)
   val simpl_sigma : Names.constant Lazy.t
   val simpl_sigma_dep : Names.constant Lazy.t
@@ -49,6 +52,8 @@ module EqRefs : EQREFS = struct
   let eq_rect = init_constant ["Coq"; "Init"; "Logic"] "eq_rect"
   let eq_rect_r = init_constant ["Coq"; "Init"; "Logic"] "eq_rect_r"
   let eq_dec = init_constant ["Equations"; "EqDec"] "EqDec"
+  let noConfusion = init_inductive ["Equations"; "DepElim"] "NoConfusionPackage"
+  let apply_noConfusion = init_depelim "apply_noConfusion"
   let simpl_sigma = init_depelim "eq_simplification_sigma1"
   let simpl_sigma_dep = init_depelim "eq_simplification_sigma1_dep"
   let simpl_sigma_dep_dep = init_depelim "eq_simplification_sigma1_dep_dep"
@@ -79,6 +84,8 @@ module type BUILDER = sig
   val eq : constr_gen
   val eq_refl : constr_gen
   val eq_dec : constr_gen
+  val noConfusion : constr_gen
+  val apply_noConfusion : constr_gen
   val simpl_sigma : constr_gen
   val simpl_sigma_dep : constr_gen
   val simpl_sigma_dep_dep : constr_gen
@@ -110,6 +117,8 @@ module BuilderGen (SigmaRefs : SIGMAREFS) (EqRefs : EQREFS) : BUILDER = struct
   let eq = gen_from_inductive EqRefs.eq
   let eq_refl = gen_from_constructor EqRefs.eq_refl
   let eq_dec = gen_from_constant EqRefs.eq_dec
+  let noConfusion = gen_from_inductive EqRefs.noConfusion
+  let apply_noConfusion = gen_from_constant EqRefs.apply_noConfusion
   let simpl_sigma = gen_from_constant EqRefs.simpl_sigma
   let simpl_sigma_dep = gen_from_constant EqRefs.simpl_sigma_dep
   let simpl_sigma_dep_dep = gen_from_constant EqRefs.simpl_sigma_dep_dep
@@ -316,12 +325,22 @@ let with_retry (f : simplification_fun) (env : Environ.env)
         Tacred.hnf_constr env !evd c
     in
   (* Try to head-reduce the goal and reapply f. *) 
-    let ty = reduce ty in
-    let ((name, _, ty2), (tA, t1, t2)) = check_equality ty in
-    let t1 = reduce t1 in
-    let t2 = reduce t2 in
-    let ty1 = Constr.mkApp (Builder.eq evd, [| tA; t1; t2 |]) in
+    let name, ty1, ty2 = try Term.destProd ty
+      with Term.DestKO -> raise (CannotSimplify (str "The goal is not a product.")) in
+    let ty1 = reduce ty1 in
     let ty = Constr.mkProd (name, ty1, ty2) in
+    (* If the head is an equality, reduce it. *)
+    (* TODO Is this necessary? *)
+    (*
+    let ty = try
+      let ((name, _, ty2), (tA, t1, t2)) = check_equality ty in
+      let t1 = reduce t1 in
+      let t2 = reduce t2 in
+      let ty1 = Constr.mkApp (Builder.eq evd, [| tA; t1; t2 |]) in
+        Constr.mkProd (name, ty1, ty2)
+      with CannotSimplify _ -> ty
+    in
+    *)
       f env evd (ctx, ty)
 
 (* Simplification functions to handle each step. *)
@@ -484,11 +503,34 @@ let solution ~(dir:direction) (env : Environ.env) (evd : Evd.evar_map ref)
   in build_term env evd (ctx, ty) ctx'' f
 
 let noConfusion (env : Environ.env) (evd : Evd.evar_map ref)
-  ((ctx, ty) : goal) : open_term=
-  failwith "[noConfusion] is not implemented!"
+  ((ctx, ty) : goal) : open_term =
+  let (name, ty1, ty2), (tA, t1, t2) = check_equality ty in
+  let f1, _ = Term.decompose_app t1 in
+  let f2, _ = Term.decompose_app t2 in
+  if not (Term.isConstruct f1 && Term.isConstruct f2) then
+    raise (CannotSimplify (str "This is not an equality between constructors."));
+  (* Find an instance of the noConfusion package. *)
+  (* FIXME Package the type with its indices if needed. *)
+  (* FIXME apply noConfusion to its parameters. *)
+  let noconf_ty = Constr.mkApp (Builder.noConfusion evd, [| tA |]) in
+  let tnoconf =
+    let env = Environ.push_rel_context ctx env in
+    try
+      Evarutil.evd_comb1
+        (Typeclasses.resolve_one_typeclass env) evd noconf_ty
+    with Not_found ->
+      raise (CannotSimplify (str
+        "[noConfusion] Cannot find an instance of NoConfusion for type " ++
+        Printer.pr_constr_env env !evd tA))
+  in
+  let tapply_noconf = Builder.apply_noConfusion evd in
+  let tB = Constr.mkLambda (name, ty1, ty2) in
+  build_term env evd (ctx, ty) ctx
+  begin fun c ->
+    Constr.mkApp (tapply_noconf, [| tA; tnoconf; t1; t2; tB; c |]) end
 
 let noCycle (env : Environ.env) (evd : Evd.evar_map ref)
-  ((ctx, ty) : goal) : open_term=
+  ((ctx, ty) : goal) : open_term =
   failwith "[noCycle] is not implemented!"
 
 let identity (env : Environ.env) (evd : Evd.evar_map ref) (gl : goal) : open_term =
@@ -523,10 +565,8 @@ let infer_step ~(isSol:bool) (env : Environ.env) (evd : Evd.evar_map ref)
     else if Term.isRel tv && check_occur tv tu then Solution (Some Left)
     else
     let check_construct t =
-      try
         let f, _ = Term.decompose_app t in
           Term.isConstruct f
-      with Term.DestKO -> false
     in
     if check_construct tu && check_construct tv then NoConfusion
     else
