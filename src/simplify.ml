@@ -19,6 +19,7 @@ module type EQREFS = sig
   (* NoConfusion. *)
   val noConfusion : Names.inductive Lazy.t
   val apply_noConfusion : Names.constant Lazy.t
+  val simplify_ind_pack : Names.constant Lazy.t
   (* Simplification of dependent pairs. *)
   val simpl_sigma : Names.constant Lazy.t
   val simpl_sigma_dep : Names.constant Lazy.t
@@ -54,6 +55,7 @@ module EqRefs : EQREFS = struct
   let eq_dec = init_constant ["Equations"; "EqDec"] "EqDec"
   let noConfusion = init_inductive ["Equations"; "DepElim"] "NoConfusionPackage"
   let apply_noConfusion = init_depelim "apply_noConfusion"
+  let simplify_ind_pack = init_depelim "simplify_ind_pack"
   let simpl_sigma = init_depelim "eq_simplification_sigma1"
   let simpl_sigma_dep = init_depelim "eq_simplification_sigma1_dep"
   let simpl_sigma_dep_dep = init_depelim "eq_simplification_sigma1_dep_dep"
@@ -86,6 +88,7 @@ module type BUILDER = sig
   val eq_dec : constr_gen
   val noConfusion : constr_gen
   val apply_noConfusion : constr_gen
+  val simplify_ind_pack : constr_gen
   val simpl_sigma : constr_gen
   val simpl_sigma_dep : constr_gen
   val simpl_sigma_dep_dep : constr_gen
@@ -119,6 +122,7 @@ module BuilderGen (SigmaRefs : SIGMAREFS) (EqRefs : EQREFS) : BUILDER = struct
   let eq_dec = gen_from_constant EqRefs.eq_dec
   let noConfusion = gen_from_inductive EqRefs.noConfusion
   let apply_noConfusion = gen_from_constant EqRefs.apply_noConfusion
+  let simplify_ind_pack = gen_from_constant EqRefs.simplify_ind_pack
   let simpl_sigma = gen_from_constant EqRefs.simpl_sigma
   let simpl_sigma_dep = gen_from_constant EqRefs.simpl_sigma_dep
   let simpl_sigma_dep_dep = gen_from_constant EqRefs.simpl_sigma_dep_dep
@@ -498,16 +502,51 @@ let solution ~(dir:direction) (env : Environ.env) (evd : Evd.evar_map ref)
         Covering.mapping_constr rev_subst c
   in build_term env evd (ctx, ty) ctx'' f
 
-let noConfusion (env : Environ.env) (evd : Evd.evar_map ref)
+(* Auxiliary steps for noConfusion. *)
+let maybe_pack (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : open_term =
   let (name, ty1, ty2), (tA, t1, t2) = check_equality ty in
+  let fA, _ = Term.decompose_app tA in
   let f1, _ = Term.decompose_app t1 in
   let f2, _ = Term.decompose_app t2 in
-  if not (Term.isConstruct f1 && Term.isConstruct f2) then
+  if not (Term.isInd fA && Term.isConstruct f1 && Term.isConstruct f2) then
     raise (CannotSimplify (str "This is not an equality between constructors."));
-  (* Find an instance of the noConfusion package. *)
-  (* FIXME Package the type with its indices if needed. *)
-  (* FIXME apply noConfusion to its parameters. *)
+  let indty = Inductiveops.find_rectype env !evd tA in
+  let indfam, args = Inductiveops.dest_ind_type indty in
+  if CList.is_empty args then
+    build_term env evd (ctx, ty) ctx (fun c -> c)
+  else begin
+    (* We need to apply [simplify_ind_pack]. *)
+    let ind, params = Inductiveops.dest_ind_family indfam in
+    let evd', tB, _, _, valsig, _, _, tA = Sigma.build_sig_of_ind env !evd ind in
+    evd := evd';
+    (* We will try to find an instance of K for the type [A]. *)
+    let eqdec_ty = Constr.mkApp (Builder.eq_dec evd, [| tA |]) in
+    let tdec =
+      let env = Environ.push_rel_context ctx env in
+      try
+        Evarutil.evd_comb1
+          (Typeclasses.resolve_one_typeclass env) evd eqdec_ty
+      with Not_found ->
+        raise (CannotSimplify (str
+          "[noConfusion] Cannot simplify without K on type " ++
+          Printer.pr_constr_env env !evd tA))
+    in
+    let tx =
+      let _, _, tx, _ = Option.get (decompose_sigma valsig) in
+        Vars.substl args (Termops.pop tx)
+    in
+    let tsimplify_ind_pack = Builder.simplify_ind_pack evd in
+    let tG = Constr.mkLambda (name, ty1, ty2) in
+    let f = fun c ->
+      Constr.mkApp (tsimplify_ind_pack, [| tA; tdec; tB; tx; t1; t2; tG; c |])
+    in
+      build_term env evd (ctx, ty) ctx f
+  end
+
+let apply_noconf (env : Environ.env) (evd : Evd.evar_map ref)
+  ((ctx, ty) : goal) : open_term =
+  let (name, ty1, ty2), (tA, t1, t2) = check_equality ty in
   let noconf_ty = Constr.mkApp (Builder.noConfusion evd, [| tA |]) in
   let tnoconf =
     let env = Environ.push_rel_context ctx env in
@@ -524,6 +563,8 @@ let noConfusion (env : Environ.env) (evd : Evd.evar_map ref)
   build_term env evd (ctx, ty) ctx
   begin fun c ->
     Constr.mkApp (tapply_noconf, [| tA; tnoconf; t1; t2; tB; c |]) end
+
+let noConfusion = compose_fun apply_noconf maybe_pack
 
 let noCycle (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : open_term =
@@ -556,11 +597,15 @@ let infer_step ~(loc:Loc.t) ~(isSol:bool)
     if Term.isRel tu && check_occur tu tv then Solution Right
     else if Term.isRel tv && check_occur tv tu then Solution Left
     else
+    let check_ind t =
+      let f, _ = Term.decompose_app t in
+        Term.isInd f
+    in
     let check_construct t =
         let f, _ = Term.decompose_app t in
           Term.isConstruct f
     in
-    if check_construct tu && check_construct tv then
+    if check_ind tA && check_construct tu && check_construct tv then
       NoConfusion [loc, Infer_many]
     else
     (* Check if [u] occurs in [t] under only constructors. *)
