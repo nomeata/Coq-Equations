@@ -6,6 +6,7 @@ type simplification_step =
   | Solution of direction
   | NoConfusion of simplification_rules
   | NoCycle
+  | ElimTrue | ElimFalse
 and simplification_rule =
     Step of simplification_step
   | Infer_one
@@ -54,6 +55,8 @@ val deletion : force:bool -> simplification_fun
 val solution : dir:direction -> simplification_fun
 val noConfusion : simplification_fun
 val noCycle : simplification_fun
+val elim_true : simplification_fun
+val elim_false : simplification_fun
 val identity : simplification_fun
 
 val execute_step : simplification_step -> simplification_fun

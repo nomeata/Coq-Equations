@@ -16,6 +16,13 @@ module type EQREFS = sig
   val eq_rect_r : Names.constant Lazy.t
   (* Decidable equality typeclass. *)
   val eq_dec : Names.constant Lazy.t
+  (* Logic types. *)
+  val zero : Names.inductive Lazy.t
+  val one : Names.inductive Lazy.t
+  val one_val : Names.constructor Lazy.t
+  val one_ind_dep : Names.constant Lazy.t
+  val zero_ind : Names.constant Lazy.t
+  val zero_ind_dep : Names.constant Lazy.t
   (* NoConfusion. *)
   val noConfusion : Names.inductive Lazy.t
   val apply_noConfusion : Names.constant Lazy.t
@@ -53,6 +60,12 @@ module EqRefs : EQREFS = struct
   let eq_rect = init_constant ["Coq"; "Init"; "Logic"] "eq_rect"
   let eq_rect_r = init_constant ["Coq"; "Init"; "Logic"] "eq_rect_r"
   let eq_dec = init_constant ["Equations"; "EqDec"] "EqDec"
+  let zero = init_inductive ["Coq"; "Init"; "Logic"] "False"
+  let one = init_inductive ["Coq"; "Init"; "Logic"] "True"
+  let one_val = init_constructor ["Coq"; "Init"; "Logic"] "I"
+  let one_ind_dep = init_depelim "True_rect_dep"
+  let zero_ind = init_constant ["Coq"; "Init"; "Logic"] "False_rect"
+  let zero_ind_dep = init_depelim "False_rect_dep"
   let noConfusion = init_inductive ["Equations"; "DepElim"] "NoConfusionPackage"
   let apply_noConfusion = init_depelim "apply_noConfusion"
   let simplify_ind_pack = init_depelim "simplify_ind_pack"
@@ -86,6 +99,12 @@ module type BUILDER = sig
   val eq : constr_gen
   val eq_refl : constr_gen
   val eq_dec : constr_gen
+  val zero : constr_gen
+  val one : constr_gen
+  val one_val : constr_gen
+  val one_ind_dep : constr_gen
+  val zero_ind : constr_gen
+  val zero_ind_dep : constr_gen
   val noConfusion : constr_gen
   val apply_noConfusion : constr_gen
   val simplify_ind_pack : constr_gen
@@ -120,6 +139,12 @@ module BuilderGen (SigmaRefs : SIGMAREFS) (EqRefs : EQREFS) : BUILDER = struct
   let eq = gen_from_inductive EqRefs.eq
   let eq_refl = gen_from_constructor EqRefs.eq_refl
   let eq_dec = gen_from_constant EqRefs.eq_dec
+  let zero = gen_from_inductive EqRefs.zero
+  let one = gen_from_inductive EqRefs.one
+  let one_val = gen_from_constructor EqRefs.one_val
+  let one_ind_dep = gen_from_constant EqRefs.one_ind_dep
+  let zero_ind = gen_from_constant EqRefs.zero_ind
+  let zero_ind_dep = gen_from_constant EqRefs.zero_ind_dep
   let noConfusion = gen_from_inductive EqRefs.noConfusion
   let apply_noConfusion = gen_from_constant EqRefs.apply_noConfusion
   let simplify_ind_pack = gen_from_constant EqRefs.simplify_ind_pack
@@ -146,6 +171,7 @@ type simplification_step =
   | Solution of direction
   | NoConfusion of simplification_rules
   | NoCycle (* TODO: NoCycle should probably take a direction too. *)
+  | ElimTrue | ElimFalse
 and simplification_rule =
     Step of simplification_step
   | Infer_one
@@ -270,25 +296,29 @@ let compose_fun (f : simplification_fun) (g : simplification_fun)
   let t2 = f env evd gl' in
     compose_term evd t1 t2
 
-(* Check that the first hypothesis in the goal is an equality, and some
- * additional constraints if specified. Raise CannotSimplify if it's
- * not the case. Otherwise, return the goal decomposed in two types,
- * the Name of the equality, its arguments. *)
-let check_equality ?(equal_terms : bool = false)
-  ?(var_left : bool = false) ?(var_right : bool = false) (ty : Term.types) :
-    ((Names.name * Term.types * Term.types) *
-     (Term.types * Term.constr * Term.constr)) =
+(* Check if a type is a given inductive. *)
+let check_inductive (ind : Names.inductive) : Term.types -> bool =
+  Globnames.is_global (Globnames.IndRef ind)
+(* Check if a term is a given constructor. *)
+let check_construct (cst : Names.constructor) : Term.constr -> bool =
+  Globnames.is_global (Globnames.ConstructRef cst)
+
+(* Deconstruct the goal if it's a product. Otherwise, raise CannotSimplify. *)
+let check_prod (ty : Term.types) : Names.name * Term.types * Term.types =
   let name, ty1, ty2 = try Term.destProd ty
     with Term.DestKO -> raise (CannotSimplify (str "The goal is not a product."))
-  in
-  let f, args = Term.decompose_appvect ty1 in
-  begin try
-    let ind = Univ.out_punivs (Term.destInd f) in
-    if not (Names.eq_ind ind (Lazy.force EqRefs.eq)) then raise Term.DestKO
-  with Term.DestKO ->
+  in name, ty1, ty2
+
+(* Check that the given type is an equality, and some
+ * additional constraints if specified. Raise CannotSimplify if it's not
+ * the case. Otherwise, return its arguments *)
+let check_equality ?(equal_terms : bool = false)
+  ?(var_left : bool = false) ?(var_right : bool = false) (ty : Term.types) :
+    Term.types * Term.constr * Term.constr =
+  let f, args = Term.decompose_appvect ty in
+  if not (check_inductive (Lazy.force EqRefs.eq) f) then
       raise (CannotSimplify (str
-        "The first hypothesis in the goal is not an equality."))
-  end;
+        "The first hypothesis in the goal is not an equality."));
   let tA = args.(0) in
   let tx, ty = args.(1), args.(2) in
   if equal_terms && not (Constr.equal tx ty) then
@@ -303,17 +333,14 @@ let check_equality ?(equal_terms : bool = false)
     raise (CannotSimplify (str
       "The right-hand side of the first hypothesis in the goal is
        not a variable."));
-  (name, ty1, ty2), (tA, tx, ty)
+  tA, tx, ty
 
 let decompose_sigma (t : Term.constr) :
   (Term.types * Term.constr * Term.constr * Term.constr) option =
-  try
-    let f, args = Term.destApp t in
-    let constr = Univ.out_punivs (Term.destConstruct f) in
-    if not (Names.eq_constructor constr (Lazy.force SigmaRefs.sigmaI)) then None
-    else Some (args.(0), args.(1), args.(2), args.(3))
-  with
-  | Term.DestKO -> None
+  let f, args = Term.decompose_appvect t in
+  if check_construct (Lazy.force SigmaRefs.sigmaI) f then
+    Some (args.(0), args.(1), args.(2), args.(3))
+  else None
 
 let with_retry (f : simplification_fun) (env : Environ.env)
   (evd : Evd.evar_map ref) ((ctx, ty) : goal) : open_term =
@@ -334,7 +361,8 @@ let with_retry (f : simplification_fun) (env : Environ.env)
     let ty = Constr.mkProd (name, ty1, ty2) in
     (* If the head is an equality, reduce it. *)
     let ty = try
-      let ((name, _, ty2), (tA, t1, t2)) = check_equality ty in
+      let name, ty1, ty2 = check_prod ty in
+      let tA, t1, t2 = check_equality ty1 in
       let t1 = reduce t1 in
       let t2 = reduce t2 in
       let ty1 = Constr.mkApp (Builder.eq evd, [| tA; t1; t2 |]) in
@@ -349,50 +377,53 @@ let with_retry (f : simplification_fun) (env : Environ.env)
 
 (* This function is not accessible by the user for now. It is used to project
  * (if needed) the first component of an equality between sigmas. It will not
- * do anything if it fails, unless the first hypothesis in the goal is not
- * even an equality. *)
+ * do anything if it fails. *)
 let remove_sigma (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : open_term =
-  let (name, ty1, ty2), (_, t1, t2) = check_equality ty in
+  let name, ty1, ty2 = check_prod ty in
   let f =
-    match decompose_sigma t1, decompose_sigma t2 with
-    | Some (tA, tB, tt, tp), Some (_, _, tu, tq) ->
-        (* Determine the degree of dependency. *)
-        if Vars.noccurn 1 ty2 then begin
-          (* No dependency in the goal, but maybe there is a dependency in
-             the pair itself. *)
-          try
-            let name', _, tBbody = Term.destLambda tB in
-            if Vars.noccurn 1 tBbody then
-              (* No dependency whatsoever. *)
-              let tsimpl_sigma = Builder.simpl_sigma evd in
-              let tP = Termops.pop tBbody in
-              let tB = Termops.pop ty2 in
-              fun c -> Constr.mkApp
-                (tsimpl_sigma, [| tA; tP; tB; tt; tu; tp; tq; c |])
-            else raise Term.DestKO
-          with
-          | Term.DestKO ->
-              (* Dependency in the pair, but not in the goal. *)
-              let tsimpl_sigma = Builder.simpl_sigma_dep evd in
+    try
+      let _, t1, t2 = check_equality ty1 in
+        match decompose_sigma t1, decompose_sigma t2 with
+        | Some (tA, tB, tt, tp), Some (_, _, tu, tq) ->
+            (* Determine the degree of dependency. *)
+            if Vars.noccurn 1 ty2 then begin
+              (* No dependency in the goal, but maybe there is a dependency in
+                 the pair itself. *)
+              try
+                let name', _, tBbody = Term.destLambda tB in
+                if Vars.noccurn 1 tBbody then
+                  (* No dependency whatsoever. *)
+                  let tsimpl_sigma = Builder.simpl_sigma evd in
+                  let tP = Termops.pop tBbody in
+                  let tB = Termops.pop ty2 in
+                  fun c -> Constr.mkApp
+                    (tsimpl_sigma, [| tA; tP; tB; tt; tu; tp; tq; c |])
+                else raise Term.DestKO
+              with
+              | Term.DestKO ->
+                  (* Dependency in the pair, but not in the goal. *)
+                  let tsimpl_sigma = Builder.simpl_sigma_dep evd in
+                  let tP = tB in
+                  let tB = Termops.pop ty2 in
+                  fun c -> Constr.mkApp
+                    (tsimpl_sigma, [| tA; tP; tB; tt; tu; tp; tq; c |])
+            end else
+              (* We assume full dependency. We could add one more special case,
+               * but we don't for now. *)
+              let tsimpl_sigma = Builder.simpl_sigma_dep_dep evd in
               let tP = tB in
-              let tB = Termops.pop ty2 in
+              let tB = Constr.mkLambda (name, ty1, ty2) in
               fun c -> Constr.mkApp
-                (tsimpl_sigma, [| tA; tP; tB; tt; tu; tp; tq; c |])
-        end else
-          (* We assume full dependency. We could add one more special case,
-           * but we don't for now. *)
-          let tsimpl_sigma = Builder.simpl_sigma_dep_dep evd in
-          let tP = tB in
-          let tB = Constr.mkLambda (name, ty1, ty2) in
-          fun c -> Constr.mkApp
-            (tsimpl_sigma, [| tA; tP; tt; tu; tp; tq; tB; c |])
-    | _, _ -> fun c -> c
+                (tsimpl_sigma, [| tA; tP; tt; tu; tp; tq; tB; c |])
+        | _, _ -> fun c -> c
+    with CannotSimplify _ -> fun c -> c
   in build_term env evd (ctx, ty) ctx f
 
 let deletion ~(force:bool) (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : open_term =
-  let (name, ty1, ty2), (tA, tx, _) = check_equality ~equal_terms:true ty in
+  let name, ty1, ty2 = check_prod ty in
+  let tA, tx, _ = check_equality ~equal_terms:true ty1 in
   let f =
     if Vars.noccurn 1 ty2 then
       (* The goal does not depend on the equality, we can just eliminate it. *)
@@ -425,7 +456,8 @@ let solution ~(dir:direction) (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : open_term =
   let var_left = match dir with Left -> true | Right -> false in
   let var_right = not var_left in
-  let (name, ty1, ty2), (tA, tx, tz) = check_equality ~var_left ~var_right ty in
+  let name, ty1, ty2 = check_prod ty in
+  let tA, tx, tz = check_equality ~var_left ~var_right ty1 in
   let trel, term =
     if var_left then tx, tz
     else tz, tx
@@ -505,7 +537,8 @@ let solution ~(dir:direction) (env : Environ.env) (evd : Evd.evar_map ref)
 (* Auxiliary steps for noConfusion. *)
 let maybe_pack (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : open_term =
-  let (name, ty1, ty2), (tA, t1, t2) = check_equality ty in
+  let name, ty1, ty2 = check_prod ty in
+  let tA, t1, t2 = check_equality ty1 in
   let fA, _ = Term.decompose_app tA in
   let f1, _ = Term.decompose_app t1 in
   let f2, _ = Term.decompose_app t2 in
@@ -546,7 +579,8 @@ let maybe_pack (env : Environ.env) (evd : Evd.evar_map ref)
 
 let apply_noconf (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : open_term =
-  let (name, ty1, ty2), (tA, t1, t2) = check_equality ty in
+  let name, ty1, ty2 = check_prod ty in
+  let tA, t1, t2 = check_equality ty1 in
   let noconf_ty = Constr.mkApp (Builder.noConfusion evd, [| tA |]) in
   let tnoconf =
     let env = Environ.push_rel_context ctx env in
@@ -570,6 +604,29 @@ let noCycle (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : open_term =
   failwith "[noCycle] is not implemented!"
 
+let elim_true (env : Environ.env) (evd : Evd.evar_map ref)
+  ((ctx, ty) : goal) : open_term =
+  let name, ty1, ty2 = check_prod ty in
+  if not (check_inductive (Lazy.force EqRefs.one) ty1) then
+    raise (CannotSimplify (str
+      "[elim_true] The first hypothesis is not the unit type."));
+  let f =
+  (* Check if the goal is dependent or not. *)
+    if Vars.noccurn 1 ty2 then
+      (* Not dependent, we can just eliminate True. *)
+      fun c -> Constr.mkLambda (name, ty1, Vars.lift 1 c)
+    else
+      (* Apply the dependent induction principle for True. *)
+      let tB = Constr.mkLambda (name, ty1, ty2) in
+      let tone_ind = Builder.one_ind_dep evd in
+      fun c ->
+        Constr.mkApp (tone_ind, [| tB; c |])
+  in build_term env evd (ctx, ty) ctx f
+
+let elim_false (env : Environ.env) (evd : Evd.evar_map ref)
+  ((ctx, ty) : goal) : open_term =
+  failwith "[elim_false] is not implemented!"
+
 let identity (env : Environ.env) (evd : Evd.evar_map ref) (gl : goal) : open_term =
   build_term env evd gl (fst gl) (fun c -> c)
 
@@ -579,17 +636,20 @@ let identity (env : Environ.env) (evd : Evd.evar_map ref) (gl : goal) : open_ter
 let infer_step ~(loc:Loc.t) ~(isSol:bool)
   (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : simplification_step =
-  (* First things first, we need to destruct the equality at the head
+  let name, ty1, ty2 = check_prod ty in
+  (* First things first, maybe the head of the goal is False or True. *)
+  if check_inductive (Lazy.force EqRefs.zero) ty1 then ElimFalse
+  else if check_inductive (Lazy.force EqRefs.one) ty1 then ElimTrue
+  else
+  (* We need to destruct the equality at the head
      to analyze it. *)
-  let (name, tyeq, tyrest), (tA, tu, tv) = check_equality ty in
+  let tA, tu, tv = check_equality ty1 in
   (* If the user wants a solution, we need to respect his wishes. *)
   if isSol then
     if Term.isRel tu then Solution Right
     else if Term.isRel tv then Solution Left
     else raise (CannotSimplify (str "Neither side of the equality is a variable."))
   else begin
-    if Constr.equal tu tv then Deletion false (* Never force K. *)
-    else
     let check_occur trel term =
       let rel = Term.destRel trel in
         not (Int.Set.mem rel (Covering.dependencies_of_term env !evd ctx term rel))
@@ -607,6 +667,7 @@ let infer_step ~(loc:Loc.t) ~(isSol:bool)
     in
     if check_ind tA && check_construct tu && check_construct tv then
       NoConfusion [loc, Infer_many]
+    else if Constr.equal tu tv then Deletion false (* Never force K. *)
     else
     (* Check if [u] occurs in [t] under only constructors. *)
     (* For now we don't care about the type of these constructors. *)
@@ -630,15 +691,15 @@ let infer_step ~(loc:Loc.t) ~(isSol:bool)
 let expand_many rule env evd ((_, ty) : goal) : simplification_rules =
   (* FIXME: maybe it's too brutal/expensive? *)
   let ty = Tacred.compute env !evd ty in
-  let _, (ty, _, _) = check_equality ty in
-  let rec aux ty acc =
-    let f, args = Term.decompose_appvect ty in
-    try
-      let ind = Univ.out_punivs (Term.destInd f) in
-      if not (Names.eq_ind ind (Lazy.force SigmaRefs.sigma)) then raise Term.DestKO;
-      aux args.(0) (rule :: acc)
-    with Term.DestKO -> acc
-  in aux ty [rule]
+  let _, ty, _ = check_prod ty in
+  try
+    let ty, _, _ = check_equality ty in
+    let rec aux ty acc =
+      let f, args = Term.decompose_appvect ty in
+      if check_inductive (Lazy.force SigmaRefs.sigma) f then aux args.(0) (rule :: acc)
+      else acc
+    in aux ty [rule]
+  with CannotSimplify _ -> [rule]
 
 
 (* Execution machinery. *)
@@ -648,6 +709,8 @@ let rec execute_step : simplification_step -> simplification_fun = function
   | Solution dir -> solution ~dir:dir
   | NoConfusion rules -> compose_fun (simplify rules) noConfusion
   | NoCycle -> noCycle
+  | ElimTrue -> elim_true
+  | ElimFalse -> elim_false
 
 and simplify_one ((loc, rule) : Loc.t * simplification_rule) :
   simplification_fun =
@@ -710,6 +773,8 @@ let pr_simplification_step : simplification_step -> Pp.std_ppcmds = function
   | Solution (Right) -> str "<-"
   | NoConfusion rules -> str "$"
   | NoCycle -> str "NoCycle"
+  | ElimTrue -> str "ElimTrue"
+  | ElimFalse -> str "ElimFalse"
 
 let pr_simplification_rule ((_, rule) : Loc.t * simplification_rule) :
   Pp.std_ppcmds = match rule with
