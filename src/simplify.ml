@@ -180,9 +180,7 @@ and simplification_rule =
 and simplification_rules = (Loc.t * simplification_rule) list
 
 type goal = Context.rel_context * Term.types
-
-type pre_open_term = Evd.evar * Term.constr
-type open_term = goal * pre_open_term
+type open_term = (goal * Evd.evar) option * Term.constr
 
 exception CannotSimplify of Pp.std_ppcmds
 
@@ -268,23 +266,25 @@ let build_term (env : Environ.env) (evd : Evd.evar_map ref) ((ctx, ty) : goal)
   Typing.check env evd c ty;
   let ty' = Evd.existential_value !evd (Term.destEvar ev_ty) in
   let ev, _ = Term.destEvar tev in
-    (ctx', ty'), (ev, c)
+    Some ((ctx', ty'), ev), c
 
 (* Build an open term by substituting the second term for the hole in the
  * first term. *)
 let compose_term (evd : Evd.evar_map ref)
-  (((ctx1, _), (ev1, c1)) : open_term) ((gl2, (ev2, c2)) : open_term) : open_term =
-  (* Currently, [c2] is typed under the rel_context [ctx1]. We want
-     to assigne it to the evar [ev1], which means that we need to transpose
-     it to the named_context of this evar. *)
-  let subst, _ = Covering.named_of_rel_context ctx1 in
-  let c2 = Vars.substl subst c2 in
-  evd := Evd.define ev1 c2 !evd;
-  gl2, (ev2, c1)
+  ((h1, c1) : open_term) ((h2, c2) : open_term) : open_term =
+  match h1 with
+  | Some ((ctx1, _), ev1) ->
+      (* Currently, [c2] is typed under the rel_context [ctx1]. We want
+         to assigne it to the evar [ev1], which means that we need to transpose
+         it to the named_context of this evar. *)
+      let subst, _ = Covering.named_of_rel_context ctx1 in
+      let c2 = Vars.substl subst c2 in
+        evd := Evd.define ev1 c2 !evd; h2, c1
+  | None -> assert false
 
 let safe_fun (f : simplification_fun)
   (env : Environ.env) (evd : Evd.evar_map ref) ((ctx, ty) : goal) : open_term =
-  let (_, (_, c)) as res = f env evd (ctx, ty) in
+  let (_, c) as res = f env evd (ctx, ty) in
   let env = Environ.push_rel_context ctx env in
   Typing.check env evd c ty;
   res
@@ -292,9 +292,12 @@ let safe_fun (f : simplification_fun)
 (* Applies [g] to the goal, then [f]. *)
 let compose_fun (f : simplification_fun) (g : simplification_fun)
   (env : Environ.env) (evd : Evd.evar_map ref) (gl : goal) : open_term =
-  let (gl', _) as t1 = g env evd gl in
-  let t2 = f env evd gl' in
-    compose_term evd t1 t2
+  let (h1, _) as t1 = g env evd gl in
+  match h1 with
+  | Some (gl', _) ->
+      let t2 = f env evd gl' in
+        compose_term evd t1 t2
+  | None -> t1
 
 (* Check if a type is a given inductive. *)
 let check_inductive (ind : Names.inductive) : Term.types -> bool =
@@ -611,7 +614,7 @@ let elim_true (env : Environ.env) (evd : Evd.evar_map ref)
     raise (CannotSimplify (str
       "[elim_true] The first hypothesis is not the unit type."));
   let f =
-  (* Check if the goal is dependent or not. *)
+    (* Check if the goal is dependent or not. *)
     if Vars.noccurn 1 ty2 then
       (* Not dependent, we can just eliminate True. *)
       fun c -> Constr.mkLambda (name, ty1, Vars.lift 1 c)
@@ -625,7 +628,21 @@ let elim_true (env : Environ.env) (evd : Evd.evar_map ref)
 
 let elim_false (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : open_term =
-  failwith "[elim_false] is not implemented!"
+  let name, ty1, ty2 = check_prod ty in
+  if not (check_inductive (Lazy.force EqRefs.zero) ty1) then
+    raise (CannotSimplify (str
+      "[elim_true] The first hypothesis is not the empty type."));
+  let tB, tzero_ind =
+  (* Check if the goal is dependent or not. *)
+    if Vars.noccurn 1 ty2 then
+      let tB = Termops.pop ty2 in
+      let tzero_ind = Builder.zero_ind evd in
+        tB, tzero_ind
+    else
+      let tB = Constr.mkLambda (name, ty1, ty2) in
+      let tzero_ind = Builder.zero_ind_dep evd in
+        tB, tzero_ind
+  in None, Constr.mkApp (tzero_ind, [| tB |])
 
 let identity (env : Environ.env) (evd : Evd.evar_map ref) (gl : goal) : open_term =
   build_term env evd gl (fst gl) (fun c -> c)
@@ -758,7 +775,7 @@ let simplify_tac (rules : simplification_rules) : unit Proofview.tactic =
      * context [ctx']. *)
     Proofview.Refine.refine ~unsafe:false (fun evd ->
       let evd = ref evd in
-      let _, (_, c) = simplify rules env evd (ctx, ty) in
+      let _, c = simplify rules env evd (ctx, ty) in
       let c = Vars.substl rev_subst c in
         !evd, c)
   end
