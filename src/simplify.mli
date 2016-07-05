@@ -5,6 +5,7 @@ type simplification_step =
     Deletion of bool (* Force the use of K? *)
   | Solution of direction
   | NoConfusion of simplification_rules
+  | NoConfusionOut
   | NoCycle
   | ElimTrue | ElimFalse
 and simplification_rule =
