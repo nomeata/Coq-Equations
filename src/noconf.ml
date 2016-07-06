@@ -97,8 +97,10 @@ let derive_no_confusion env evd (ind,u as indu) =
       in
       let () = evd := evm in
       let sigma = Evarutil.e_new_global evd (Lazy.force coq_sigma) in
+      let pred = Reduction.beta_appvect pred (extended_rel_vect 0 pars) in
       let indty = mkApp (sigma, [|idx; pred|]) in
-      nf_betaiotazeta !evd indty, mkProj (Lazy.force coq_pr2, mkRel 1), pars, ctx
+      let args, _ = List.chop lenargs ctx in
+      nf_betaiotazeta !evd indty, mkProj (Lazy.force coq_pr2, mkRel 1), pars, args
   in
   let indty = mkApp (mkIndU indu, argsvect) in
   let tru = Universes.constr_of_global (Lazy.force (get_one ())) in
@@ -119,10 +121,11 @@ let derive_no_confusion env evd (ind,u as indu) =
   let lenargs = List.length argsctx in
   let pred =
     let elim =
-      let app = pack_ind_with_parlift (args + 1) in
+      let app = pack_ind_with_parlift (args + 2) in
 	it_mkLambda_or_LetIn 
-	  (mkProd_or_LetIn (Anonymous, None, lift 1 app) s)
-	  ((Name xid, None, ind_with_parlift (1 + lenargs)) :: argsctx)
+	  (mkProd_or_LetIn (Anonymous, None, app) s)
+	  ((Name xid, None, ind_with_parlift 1) :: 
+          (lift_rel_context 1 argsctx))
     in
       mkcase env x elim (fun ind i id nparams args arity ->
 	let ydecl = (Name yid, None, pack_ind_with_parlift (List.length args + 1)) in
@@ -130,7 +133,8 @@ let derive_no_confusion env evd (ind,u as indu) =
 	let elimdecl = (Name yid, None, ind_with_parlift (List.length args + 2)) in
 	  mkLambda_or_LetIn ydecl
 	    (mkcase env' x
-		(it_mkLambda_or_LetIn s (elimdecl :: argsctx))
+		(it_mkLambda_or_LetIn s (elimdecl ::
+                  (lift_rel_context (List.length args + 2) argsctx)))
 		(fun _ i' id' nparams args' arity' ->
 		  if i = i' then 
 		    if List.length args = 0 then tru
@@ -150,7 +154,7 @@ let derive_no_confusion env evd (ind,u as indu) =
   let noconf = Evarutil.e_new_global evd (ConstRef cstNoConf) in
   let noconfcl = Evarutil.e_new_global evd tc.Typeclasses.cl_impl in
   let inst, u = destInd noconfcl in
-  let noconfterm = mkApp (noconf, paramsvect) in
+  let noconfterm = mkApp (noconf, extended_rel_vect 0 ctx) in
   let argty =
     let ty = Retyping.get_type_of env !evd noconfterm in
     match kind_of_term ty with
@@ -160,7 +164,7 @@ let derive_no_confusion env evd (ind,u as indu) =
   let b, ty = 
     Typeclasses.instance_constructor (tc,u) [argty; noconfterm]
   in
-  let env = push_rel_context ctx (Global.env ()) in
+  let env = push_rel_context ctx env in
   let rec term c ty =
     match kind_of_term ty with
     | Prod (na, t, ty) ->
@@ -168,6 +172,7 @@ let derive_no_confusion env evd (ind,u as indu) =
        term (mkApp (c, [|arg|])) (subst1 arg ty)
     | _ -> c, ty
   in
+  let env = Global.env () in
   let cty = Retyping.get_type_of env !evd (Option.get b) in
   let term, ty = term (Option.get b) cty in
   let term = it_mkLambda_or_LetIn term ctx in
