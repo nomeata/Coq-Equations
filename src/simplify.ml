@@ -367,7 +367,7 @@ let with_retry (f : simplification_fun) (env : Environ.env)
     let res = f env evd' (ctx, ty) in
     evd := !evd'; res
   with CannotSimplify _ ->
-    msg_info (str "Reduce!");
+    (*msg_info (str "Reduce!");*)
     let reduce c =
       let env = Environ.push_rel_context ctx env in
         Tacred.hnf_constr env !evd c
@@ -569,7 +569,7 @@ let maybe_pack (env : Environ.env) (evd : Evd.evar_map ref)
   else begin
     (* We need to apply [simplify_ind_pack]. *)
     let ind, params = Inductiveops.dest_ind_family indfam in
-    let evd', tB, _, _, valsig, _, _, tA = Sigma.build_sig_of_ind env !evd ind in
+    let evd', tBfull, _, _, valsig, _, _, tA = Sigma.build_sig_of_ind env !evd ind in
     evd := evd';
     (* We will try to find an instance of K for the type [A]. *)
     let eqdec_ty = Constr.mkApp (Builder.eq_dec evd, [| tA |]) in
@@ -588,6 +588,7 @@ let maybe_pack (env : Environ.env) (evd : Evd.evar_map ref)
         Vars.substl args (Termops.pop tx)
     in
     let tsimplify_ind_pack = Builder.simplify_ind_pack evd in
+    let tB = Reductionops.beta_applist (tBfull, params) in
     let tG = Constr.mkLambda (name, ty1, ty2) in
     let f = fun c ->
       Constr.mkApp (tsimplify_ind_pack, [| tA; tdec; tB; tx; t1; t2; tG; c |])
@@ -836,10 +837,8 @@ let simplify_tac (rules : simplification_rules) : unit Proofview.tactic =
     (* [ty'] is the expected type of the hole in the term, under the
      * context [ctx']. *)
     Proofview.Refine.refine ~unsafe:false (fun evd ->
-      (*
       msg_info (str "Goal is: " ++ Printer.pr_constr_env
         (Proofview.Goal.env gl) evd concl);
-      *)
       let evd = ref evd in
       let _, c = simplify rules env evd (ctx, ty) in
       let c = Vars.substl rev_subst c in
