@@ -827,8 +827,12 @@ let simplify_tac (rules : simplification_rules) : unit Proofview.tactic =
     let gl = Proofview.Goal.assume gl in
     let env = Environ.reset_context (Proofview.Goal.env gl) in
     let hyps = Proofview.Goal.hyps gl in
+    (* Keep aside the section variables. *)
+    let loc_hyps, sec_hyps = CList.split_when
+      (fun (id, _, _) -> Termops.is_section_variable id) hyps in
+    let env = Environ.push_named_context sec_hyps env in
     (* We want to work in a [rel_context], not a [named_context]. *)
-    let ctx, subst = Covering.rel_of_named_context hyps in
+    let ctx, subst = Covering.rel_of_named_context loc_hyps in
     let rev_subst, _ = Covering.named_of_rel_context ctx in
     let concl = Proofview.Goal.concl gl in
     (* We also need to convert the goal for it to be well-typed in
