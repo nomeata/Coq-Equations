@@ -768,11 +768,13 @@ let infer_step ~(loc:Loc.t) ~(isSol:bool)
 
 let expand_many rule env evd ((_, ty) : goal) : simplification_rules =
   (* FIXME: maybe it's too brutal/expensive? *)
-  let ty = Tacred.compute env !evd ty in
+  let ty = Tacred.hnf_constr env !evd ty in
   let _, ty, _ = check_prod ty in
   try
+    let ty = Tacred.hnf_constr env !evd ty in
     let ty, _, _ = check_equality ty in
     let rec aux ty acc =
+      let ty = Tacred.hnf_constr env !evd ty in
       let f, args = Term.decompose_appvect ty in
       if check_inductive (Lazy.force SigmaRefs.sigma) f then aux args.(0) (rule :: acc)
       else acc
@@ -841,8 +843,10 @@ let simplify_tac (rules : simplification_rules) : unit Proofview.tactic =
     (* [ty'] is the expected type of the hole in the term, under the
      * context [ctx']. *)
     Proofview.Refine.refine ~unsafe:false (fun evd ->
+      (*
       msg_info (str "Goal is: " ++ Printer.pr_constr_env
         (Proofview.Goal.env gl) evd concl);
+      *)
       let evd = ref evd in
       let _, c = simplify rules env evd (ctx, ty) in
       let c = Vars.substl rev_subst c in

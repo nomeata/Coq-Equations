@@ -873,10 +873,9 @@ let prove_unfolding_lemma info proj f_cst funf_cst split gl =
   let helpercsts = List.map (fun (_, _, i) -> fst (destConst (global_reference i)))
 			    info.helpers_info in
   let opacify, transp = simpl_of helpercsts in
-  let simpltac gl = opacify ();
-    let res = to82 (simpl_equations_tac ()) gl in
-      transp (); res
-  in
+  let opacified tac gl = opacify (); let res = tac gl in transp (); res in
+  let simpltac gl = opacified (to82 (simpl_equations_tac ())) gl in
+  let simpl = opacified simpl_in_concl in
   let unfolds = tclTHEN (autounfold_first [info.base_id] None)
     (autounfold_first [info.base_id ^ "_unfold"] None)
   in
@@ -909,7 +908,7 @@ let prove_unfolding_lemma info proj f_cst funf_cst split gl =
 	     let splits = List.map_filter (fun x -> x) (Array.to_list splits) in
 	       to82 (abstract (of82 (tclTHEN_i (to82 (depelim id))
 				  (fun i -> let split = nth splits (pred i) in
-					      tclTHENLIST [unfolds; aux split])))) gl
+                                              tclTHENLIST [unfolds; simpl; aux split])))) gl
 	  | _ -> tclFAIL 0 (str"Unexpected unfolding goal") gl)
 	    
     | Valid ((ctx, _, _), ty, substc, tac, valid, rest) ->
