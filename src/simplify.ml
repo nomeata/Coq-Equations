@@ -310,6 +310,24 @@ let compose_fun (f : simplification_fun) (g : simplification_fun)
         compose_term evd t1 t2
   | None -> t1
 
+
+let identity (env : Environ.env) (evd : Evd.evar_map ref) (gl : goal) : open_term =
+  build_term env evd gl (fst gl) (fun c -> c)
+
+let while_fun (f : simplification_fun)
+  (env : Environ.env) (evd : Evd.evar_map ref) (gl : goal) : open_term =
+  let rec aux env evd gl =
+    match f env evd gl with
+    | (Some (gl', _), _) as t1 ->
+        begin try
+          let t2 = aux env evd gl' in
+            compose_term evd t1 t2
+        with CannotSimplify _ -> t1 end
+    | (None, _) as t1 -> t1
+  in try
+    aux env evd gl
+  with CannotSimplify _ -> identity env evd gl
+
 (* Check if a type is a given inductive. *)
 let check_inductive (ind : Names.inductive) : Term.types -> bool =
   Globnames.is_global (Globnames.IndRef ind)
@@ -398,45 +416,44 @@ let with_retry (f : simplification_fun) (env : Environ.env)
  * do anything if it fails. *)
 let remove_sigma (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : open_term =
+  let name, ty1, ty2 = check_prod ty in
+  let _, t1, t2 = check_equality ty1 in
   let f =
-  try
-    let name, ty1, ty2 = check_prod ty in
-    let _, t1, t2 = check_equality ty1 in
-      match decompose_sigma t1, decompose_sigma t2 with
-      | Some (tA, tB, tt, tp), Some (_, _, tu, tq) ->
-          (* Determine the degree of dependency. *)
-          if Vars.noccurn 1 ty2 then begin
-            (* No dependency in the goal, but maybe there is a dependency in
-               the pair itself. *)
-            try
-              let name', _, tBbody = Term.destLambda tB in
-              if Vars.noccurn 1 tBbody then
-                (* No dependency whatsoever. *)
-                let tsimpl_sigma = Builder.simpl_sigma evd in
-                let tP = Termops.pop tBbody in
-                let tB = Termops.pop ty2 in
-                fun c -> Constr.mkApp
-                  (tsimpl_sigma, [| tA; tP; tB; tt; tu; tp; tq; c |])
-              else raise Term.DestKO
-            with
-            | Term.DestKO ->
-                (* Dependency in the pair, but not in the goal. *)
-                let tsimpl_sigma = Builder.simpl_sigma_dep evd in
-                let tP = tB in
-                let tB = Termops.pop ty2 in
-                fun c -> Constr.mkApp
-                  (tsimpl_sigma, [| tA; tP; tB; tt; tu; tp; tq; c |])
-          end else
-            (* We assume full dependency. We could add one more special case,
-             * but we don't for now. *)
-            let tsimpl_sigma = Builder.simpl_sigma_dep_dep evd in
-            let tP = tB in
-            let tB = Constr.mkLambda (name, ty1, ty2) in
-            fun c -> Constr.mkApp
-              (tsimpl_sigma, [| tA; tP; tt; tu; tp; tq; tB; c |])
-      | _, _ -> fun c -> c
-  with CannotSimplify _ -> fun c -> c
+    match decompose_sigma t1, decompose_sigma t2 with
+    | Some (tA, tB, tt, tp), Some (_, _, tu, tq) ->
+        (* Determine the degree of dependency. *)
+        if Vars.noccurn 1 ty2 then begin
+          (* No dependency in the goal, but maybe there is a dependency in
+             the pair itself. *)
+          try
+            let name', _, tBbody = Term.destLambda tB in
+            if Vars.noccurn 1 tBbody then
+              (* No dependency whatsoever. *)
+              let tsimpl_sigma = Builder.simpl_sigma evd in
+              let tP = Termops.pop tBbody in
+              let tB = Termops.pop ty2 in
+              fun c -> Constr.mkApp
+                (tsimpl_sigma, [| tA; tP; tB; tt; tu; tp; tq; c |])
+            else raise Term.DestKO
+          with
+          | Term.DestKO ->
+              (* Dependency in the pair, but not in the goal. *)
+              let tsimpl_sigma = Builder.simpl_sigma_dep evd in
+              let tP = tB in
+              let tB = Termops.pop ty2 in
+              fun c -> Constr.mkApp
+                (tsimpl_sigma, [| tA; tP; tB; tt; tu; tp; tq; c |])
+        end else
+          (* We assume full dependency. We could add one more special case,
+           * but we don't for now. *)
+          let tsimpl_sigma = Builder.simpl_sigma_dep_dep evd in
+          let tP = tB in
+          let tB = Constr.mkLambda (name, ty1, ty2) in
+          fun c -> Constr.mkApp
+            (tsimpl_sigma, [| tA; tP; tt; tu; tp; tq; tB; c |])
+    | _, _ -> raise (CannotSimplify (str "If you see this, please report."))
   in build_term env evd (ctx, ty) ctx f
+let remove_sigma = while_fun remove_sigma
 
 let deletion ~(force:bool) (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : open_term =
@@ -697,9 +714,6 @@ let elim_false (env : Environ.env) (evd : Evd.evar_map ref)
   let _ = let env = Environ.push_rel_context ctx env in
     Typing.e_type_of env evd c in
     None, c
-
-let identity (env : Environ.env) (evd : Evd.evar_map ref) (gl : goal) : open_term =
-  build_term env evd gl (fst gl) (fun c -> c)
 
 
 (* Inference mechanism. *)
