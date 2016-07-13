@@ -260,7 +260,7 @@ let strengthen (env : Environ.env) (evd : Evd.evar_map) (ctx : Context.rel_conte
 (* Build an open term from a [Term.constr -> Term.constr] function, a goal
    and an expected [Context.rel_context] for the hole, using typing to infer
    the type of the hole. *)
-let build_term (env : Environ.env) (evd : Evd.evar_map ref) ((ctx, ty) : goal)
+let build_term_infer (env : Environ.env) (evd : Evd.evar_map ref) ((ctx, ty) : goal)
   (ctx' : Context.rel_context) (f : Term.constr -> Term.constr) : open_term =
   let ev_ty, tev =
     let env = Environ.push_rel_context ctx' env in
@@ -278,6 +278,56 @@ let build_term (env : Environ.env) (evd : Evd.evar_map ref) ((ctx, ty) : goal)
   msg_info (str "Type of hole is: " ++ Printer.pr_constr_env env !evd ty');
   *)
     Some ((ctx', ty'), ev), c
+
+(* Same, but no inference. *)
+let build_term (env : Environ.env) (evd : Evd.evar_map ref) ((ctx, ty) : goal)
+  ((ctx', ty') : goal) (f : Term.constr -> Term.constr) : open_term =
+  let tev =
+    let env = Environ.push_rel_context ctx' env in
+      Evarutil.e_new_evar env evd ty'
+  in
+  let c = f tev in
+  let env = Environ.push_rel_context ctx env in
+  let _ = Typing.e_type_of env evd c in
+  let ev, _ = Term.destEvar tev in
+    Some ((ctx', ty'), ev), c
+
+
+let build_app_infer (env : Environ.env) (evd : Evd.evar_map ref) ((ctx, ty) : goal)
+  (ctx' : Context.rel_context) (f : Globnames.global_reference)
+  (args : Term.constr option list) : open_term =
+  let tf, ty =
+    match f with
+    | Globnames.VarRef var -> assert false
+    | Globnames.ConstRef cst ->
+        let pcst = Evarutil.evd_comb1 (Evd.fresh_constant_instance env) evd cst in
+        let tf = Constr.mkConstU pcst in
+        let ty = Typeops.type_of_constant_in env pcst in
+          tf, ty
+    | Globnames.IndRef ind ->
+        let pind = Evarutil.evd_comb1 (Evd.fresh_inductive_instance env) evd ind in
+        let tf = Constr.mkIndU pind in
+        let ty = Inductiveops.type_of_inductive env pind in
+          tf, ty
+    | Globnames.ConstructRef cstr ->
+        let pcstr = Evarutil.evd_comb1 (Evd.fresh_constructor_instance env) evd cstr in
+        let tf = Constr.mkConstructU pcstr in
+        let ty = Inductiveops.type_of_constructor env pcstr in
+          tf, ty
+  in
+  let rec aux ty args =
+    match Term.kind_of_term ty, args with
+    | Constr.Prod (_, t, c), (Some hd) :: tl -> aux (Vars.subst1 hd c) tl
+    | Constr.Prod (_, t, _), None :: _ -> t
+    | Constr.LetIn (_, b, _, c), args -> aux (Vars.subst1 b c) args
+    | Constr.Cast (c, _, _), args -> aux c args
+    | _, _ -> failwith "Unexpected mismatch."
+  in
+  let ty' = aux ty args in
+  let ty' = Reductionops.whd_beta !evd ty' in
+    build_term env evd (ctx, ty) (ctx', ty') begin fun c ->
+      let targs = Array.of_list (CList.map (Option.default c) args) in
+        Constr.mkApp (tf, targs) end
 
 (* Build an open term by substituting the second term for the hole in the
  * first term. *)
@@ -312,7 +362,7 @@ let compose_fun (f : simplification_fun) (g : simplification_fun)
 
 
 let identity (env : Environ.env) (evd : Evd.evar_map ref) (gl : goal) : open_term =
-  build_term env evd gl (fst gl) (fun c -> c)
+  build_term env evd gl gl (fun c -> c)
 
 let while_fun (f : simplification_fun)
   (env : Environ.env) (evd : Evd.evar_map ref) (gl : goal) : open_term =
@@ -452,40 +502,39 @@ let remove_sigma (env : Environ.env) (evd : Evd.evar_map ref)
           fun c -> Constr.mkApp
             (tsimpl_sigma, [| tA; tP; tt; tu; tp; tq; tB; c |])
     | _, _ -> raise (CannotSimplify (str "If you see this, please report."))
-  in build_term env evd (ctx, ty) ctx f
+  in build_term_infer env evd (ctx, ty) ctx f
 let remove_sigma = while_fun remove_sigma
 
 let deletion ~(force:bool) (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : open_term =
   let name, ty1, ty2 = check_prod ty in
   let tA, tx, _ = check_equality ~equal_terms:true ty1 in
-  let f =
-    if Vars.noccurn 1 ty2 then
-      (* The goal does not depend on the equality, we can just eliminate it. *)
-      fun c -> Constr.mkLambda (name, ty1, Vars.lift 1 c)
+  if Vars.noccurn 1 ty2 then
+    (* The goal does not depend on the equality, we can just eliminate it. *)
+    build_term env evd (ctx, ty) (ctx, Termops.pop ty2)
+      (fun c -> Constr.mkLambda (name, ty1, Vars.lift 1 c))
+  else
+    let tB = Constr.mkLambda (name, ty1, ty2) in
+    if force then
+      (* The user wants to use K directly. *)
+      build_app_infer env evd (ctx, ty) ctx
+      (Globnames.ConstRef (Lazy.force EqRefs.simpl_K))
+      [Some tA; Some tx; Some tB; None]
     else
-      let tB = Constr.mkLambda (name, ty1, ty2) in
-      if force then
-        (* The user wants to use K directly. *)
-        let tsimpl_K = Builder.simpl_K evd in
-        fun c ->
-          Constr.mkApp (tsimpl_K, [| tA; tx; tB; c |])
-      else
-        (* We will try to find an instance of K for the type [A]. *)
-        let tsimpl_K_dec = Builder.simpl_K_dec evd in
-        let eqdec_ty = Constr.mkApp (Builder.eq_dec evd, [| tA |]) in
-        let tdec =
-          let env = Environ.push_rel_context ctx env in
-          try
-            Evarutil.evd_comb1
-              (Typeclasses.resolve_one_typeclass env) evd eqdec_ty
-          with Not_found ->
-            raise (CannotSimplify (str
-              "[deletion] Cannot simplify without K on type " ++
-              Printer.pr_constr_env env !evd tA))
-        in fun c ->
-            Constr.mkApp (tsimpl_K_dec, [| tA; tdec; tx; tB; c |])
-  in build_term env evd (ctx, ty) ctx f
+      (* We will try to find an instance of K for the type [A]. *)
+      let tsimpl_K_dec = Builder.simpl_K_dec evd in
+      let eqdec_ty = Constr.mkApp (Builder.eq_dec evd, [| tA |]) in
+      let tdec =
+        let env = Environ.push_rel_context ctx env in
+        try
+          Evarutil.evd_comb1
+            (Typeclasses.resolve_one_typeclass env) evd eqdec_ty
+        with Not_found ->
+          raise (CannotSimplify (str
+            "[deletion] Cannot simplify without K on type " ++
+            Printer.pr_constr_env env !evd tA))
+      in build_term_infer env evd (ctx, ty) ctx (fun c ->
+          Constr.mkApp (tsimpl_K_dec, [| tA; tdec; tx; tB; c |]))
 
 let solution ~(dir:direction) (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : open_term =
@@ -567,7 +616,7 @@ let solution ~(dir:direction) (env : Environ.env) (evd : Evd.evar_map ref)
       let c = Constr.mkLambda (name, ty1', c) in
       (* And now we recover a term in the context [ctx]. *)
         Covering.mapping_constr rev_subst c
-  in build_term env evd (ctx, ty) ctx'' f
+  in build_term_infer env evd (ctx, ty) ctx'' f
 
 (* Auxiliary steps for noConfusion. *)
 let maybe_pack (env : Environ.env) (evd : Evd.evar_map ref)
@@ -582,7 +631,7 @@ let maybe_pack (env : Environ.env) (evd : Evd.evar_map ref)
   let indty = Inductiveops.find_rectype env !evd tA in
   let indfam, args = Inductiveops.dest_ind_type indty in
   if CList.is_empty args then
-    build_term env evd (ctx, ty) ctx (fun c -> c)
+    identity env evd (ctx, ty)
   else begin
     (* We need to apply [simplify_ind_pack]. *)
     let ind, params = Inductiveops.dest_ind_family indfam in
@@ -610,7 +659,7 @@ let maybe_pack (env : Environ.env) (evd : Evd.evar_map ref)
     let f = fun c ->
       Constr.mkApp (tsimplify_ind_pack, [| tA; tdec; tB; tx; t1; t2; tG; c |])
     in
-      build_term env evd (ctx, ty) ctx f
+      build_term_infer env evd (ctx, ty) ctx f
   end
 
 let apply_noconf (env : Environ.env) (evd : Evd.evar_map ref)
@@ -630,9 +679,8 @@ let apply_noconf (env : Environ.env) (evd : Evd.evar_map ref)
   in
   let tapply_noconf = Builder.apply_noConfusion evd in
   let tB = Constr.mkLambda (name, ty1, ty2) in
-  build_term env evd (ctx, ty) ctx
-  begin fun c ->
-    Constr.mkApp (tapply_noconf, [| tA; tnoconf; t1; t2; tB; c |]) end
+    build_term_infer env evd (ctx, ty) ctx begin fun c ->
+      Constr.mkApp (tapply_noconf, [| tA; tnoconf; t1; t2; tB; c |]) end
 
 let simplify_ind_pack_inv (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : open_term =
@@ -660,11 +708,10 @@ let simplify_ind_pack_inv (env : Environ.env) (evd : Evd.evar_map ref)
       raise (CannotSimplify (str
         "[opaque_ind_pack_eq_inv] should be applied to [eq_refl]."));
     let tsimplify_ind_pack_inv = Builder.simplify_ind_pack_inv evd in
-      build_term env evd (ctx, ty) ctx begin fun c ->
+      build_term_infer env evd (ctx, ty) ctx begin fun c ->
         Constr.mkApp (tsimplify_ind_pack_inv, [| tA; teqdec; tB; tx; tp; tG; c |])
       end
-  with CannotSimplify _ ->
-    build_term env evd (ctx, ty) ctx (fun c -> c)
+  with CannotSimplify _ -> identity env evd (ctx, ty)
 
 let noConfusion = compose_fun apply_noconf maybe_pack
 
@@ -678,18 +725,17 @@ let elim_true (env : Environ.env) (evd : Evd.evar_map ref)
   if not (check_inductive (Lazy.force EqRefs.one) ty1) then
     raise (CannotSimplify (str
       "[elim_true] The first hypothesis is not the unit type."));
-  let f =
-    (* Check if the goal is dependent or not. *)
-    if Vars.noccurn 1 ty2 then
-      (* Not dependent, we can just eliminate True. *)
-      fun c -> Constr.mkLambda (name, ty1, Vars.lift 1 c)
-    else
-      (* Apply the dependent induction principle for True. *)
-      let tB = Constr.mkLambda (name, ty1, ty2) in
-      let tone_ind = Builder.one_ind_dep evd in
-      fun c ->
-        Constr.mkApp (tone_ind, [| tB; c |])
-  in build_term env evd (ctx, ty) ctx f
+  (* Check if the goal is dependent or not. *)
+  if Vars.noccurn 1 ty2 then
+    (* Not dependent, we can just eliminate True. *)
+    build_term env evd (ctx, ty) (ctx, Termops.pop ty2)
+      (fun c -> Constr.mkLambda (name, ty1, Vars.lift 1 c))
+  else
+    (* Apply the dependent induction principle for True. *)
+    let tB = Constr.mkLambda (name, ty1, ty2) in
+    let tone_ind = Builder.one_ind_dep evd in
+      build_term_infer env evd (ctx, ty) ctx
+        (fun c -> Constr.mkApp (tone_ind, [| tB; c |]))
 
 let elim_false (env : Environ.env) (evd : Evd.evar_map ref)
   ((ctx, ty) : goal) : open_term =
@@ -836,7 +882,9 @@ and simplify_one ((loc, rule) : Loc.t * simplification_rule) :
 
 and simplify (rules : simplification_rules) : simplification_fun =
   let funs = List.rev_map simplify_one rules in
-    List.fold_left compose_fun identity funs
+    match funs with
+    | [] -> identity
+    | hd :: tl -> List.fold_left compose_fun hd tl
 
 let simplify_tac (rules : simplification_rules) : unit Proofview.tactic =
   Proofview.Goal.enter begin fun gl ->
