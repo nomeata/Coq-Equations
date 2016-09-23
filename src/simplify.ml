@@ -307,6 +307,8 @@ let build_app_infer (env : Environ.env) (evd : Evd.evar_map ref) ((ctx, ty) : go
       let targs = Array.of_list (CList.map (Option.default c) args) in
         Constr.mkApp (tf, targs) end
 
+let conv_fun = Evarconv.evar_conv_x Names.full_transparent_state
+
 (* Build an open term by substituting the second term for the hole in the
  * first term. *)
 let compose_term (evd : Evd.evar_map ref)
@@ -318,7 +320,9 @@ let compose_term (evd : Evd.evar_map ref)
          it to the named_context of this evar. *)
       let subst, _ = Covering.named_of_rel_context ctx1 in
       let c2 = Vars.substl subst c2 in
-        evd := Evd.define ev1 c2 !evd; h2, c1
+      evd := Evd.define ev1 c2 !evd;
+      evd := Evarsolve.check_evar_instance !evd ev1 c2 conv_fun;
+      h2, c1
   | None -> assert false
 
 let safe_fun (f : simplification_fun)
