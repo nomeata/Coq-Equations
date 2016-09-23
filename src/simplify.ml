@@ -314,7 +314,7 @@ let compose_term (evd : Evd.evar_map ref)
   match h1 with
   | Some ((ctx1, _), ev1) ->
       (* Currently, [c2] is typed under the rel_context [ctx1]. We want
-         to assigne it to the evar [ev1], which means that we need to transpose
+         to assign it to the evar [ev1], which means that we need to transpose
          it to the named_context of this evar. *)
       let subst, _ = Covering.named_of_rel_context ctx1 in
       let c2 = Vars.substl subst c2 in
@@ -418,7 +418,8 @@ let with_retry (f : simplification_fun) (env : Environ.env)
       let env = Environ.push_rel_context ctx env in
         Tacred.hnf_constr env !evd c
     in
-  (* Try to head-reduce the goal and reapply f. *) 
+    (* Try to head-reduce the goal and reapply f. *) 
+    let ty = reduce ty in
     let name, ty1, ty2 = try Term.destProd ty
       with Term.DestKO -> raise (CannotSimplify (str "The goal is not a product.")) in
     let ty1 = reduce ty1 in
