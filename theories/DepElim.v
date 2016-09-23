@@ -344,7 +344,7 @@ Ltac elim_ind p := elim_tac ltac:(fun p el => induction p using el) p.
 (** Lemmas used by the simplifier, mainly rephrasings of [eq_rect], [eq_ind]. *)
 
 Lemma solution_left : ∀ {A} {B : A -> Type} (t : A), B t -> (∀ x, x = t -> B x).
-Proof. intros A B t H x eq. destruct eq. apply H. Defined.
+Proof. intros A B t H x eq. symmetry in eq. destruct eq. apply H. Defined.
 
 Polymorphic
 Lemma Id_solution_left : ∀ {A} {B : A -> Type} (t : A), B t -> (∀ x, Id x t -> B x).
@@ -467,6 +467,22 @@ Proof.
   rewrite inj_right_sigma_refl. reflexivity.
 Defined.
 Arguments simplification_sigma2_dec : simpl never.
+
+Polymorphic Lemma simplification_sigma2_dec_point :
+  ∀ {A} (p : A) `{EqDecPoint A p} {P : A -> Type} {B}
+    (x y : P p),
+    (x = y -> B) -> (sigmaI P p x = sigmaI P p y -> B).
+Proof. intros. apply X. apply inj_right_sigma_point in H0. assumption. Defined.
+
+Polymorphic Lemma simplification_sigma2_dec_point_refl :
+  ∀ {A} (p : A) `{eqdec:EqDecPoint A p} {P : A -> Type} {B}
+    (x : P p) (G : x = x -> B),
+      @simplification_sigma2_dec_point A p eqdec P B x x G eq_refl = G eq_refl.
+Proof.
+  intros. unfold simplification_sigma2_dec_point.
+  rewrite inj_right_sigma_refl_point. reflexivity.
+Defined.
+Arguments simplification_sigma2_dec_point : simpl never.
 
 Polymorphic Lemma Id_simplification_sigma2 : ∀ {A} `{HSets.HSet A} {P : A -> Type} {B}
                                                (p : A) (x y : P p),
@@ -698,6 +714,7 @@ Qed.
 
 Global Opaque simplification_existT2 simplification_existT2_dec
        simplification_sigma2 simplification_sigma2_dec
+       simplification_sigma2_dec_point
        simplification_heq simplification_K simplification_K_dec
        simplify_ind_pack simplified_ind_pack Id_simplification_sigma2.
 
@@ -713,6 +730,8 @@ Ltac rewrite_sigma2_refl :=
     rewrite (@Id_simplification_sigma2_refl A H P B p x X); simpl
   | |- context [@simplification_sigma2_dec ?A ?H ?P ?B ?p ?x ?y ?X eq_refl] =>
     rewrite (@simplification_sigma2_dec_refl A H P B p x X); simpl
+  | |- context [@simplification_sigma2_dec_point ?A ?p ?H ?P ?B ?x ?y ?X eq_refl] =>
+    rewrite (@simplification_sigma2_dec_point_refl A p H P B x X); simpl
   | |- context [@simplification_K ?A ?x ?B ?p eq_refl] =>
     rewrite (@simplification_K_refl A x B p); simpl eq_rect
   | |- context [@simplification_K_dec ?A ?dec ?x ?B ?p eq_refl] =>
@@ -758,6 +777,7 @@ Extraction Inline simplification_sigma2.
 Extraction Inline simplification_K simplification_K_dec.
 Extraction Inline Id_solution_right_dep Id_solution_right Id_solution_left Id_solution_left_dep.
 Extraction Inline Id_solution_right_let Id_solution_left_let Id_deletion.
+Extraction Inline eq_simplification_sigma1 eq_simplification_sigma1_dep.
 Extraction Inline Id_simplification_sigma1 Id_simplification_sigma2 Id_simplification_K.
 
 (** Simply unfold as much as possible. *)
@@ -866,6 +886,7 @@ Ltac simplify_one_dep_elim_term c :=
         match goal with
         | _ : x = y |- _ => intro
         | _ =>
+          (refine (simplification_sigma2_dec_point (A:=A) (P:=P) (B:=B) n x y _); try typeclasses eauto) ||
           apply (simplification_sigma2_dec (A:=A) (P:=P) (B:=B) n x y) ||
             refine (@simplification_sigma2 _ _ _ _ _ _ _)
         end
@@ -1344,6 +1365,95 @@ Ltac hnf_eq :=
         convert_concl_no_check (Id x' y')
   end.
 
+
+Ltac red_eq :=
+  match goal with
+    |- ?x = ?y =>
+    let rec reduce_eq x y :=
+      let x' := eval red in x in
+      let y' := eval red in y in
+          reduce_eq x' y' || convert_concl_no_check (x' = y')
+      in reduce_eq x y
+  | |- Id ?x ?y =>
+    let x' := eval hnf in x in
+    let y' := eval hnf in y in
+        convert_concl_no_check (Id x' y')
+  end.
+
+Ltac red_gl :=
+  match goal with
+    |- ?P ?x =>
+    let rec reduce x :=
+      let x' := eval red in x in
+        reduce x' || convert_concl_no_check (P x')
+      in reduce x
+  end.
+
+
+Ltac rewrite_sigma2_rule c :=
+  match c with
+  | inj_sigma2 ?A ?P ?x ?p _ eq_refl =>
+    rewrite (inj_sigma2_refl A x P p)
+  | @inj_right_sigma ?A ?H ?x ?P ?y ?y' _ =>
+    rewrite (@inj_right_sigma_refl A H x P y)
+  | @simplify_ind_pack ?A ?eqdec ?B ?x ?p _ ?G _ eq_refl=>
+    rewrite (@simplify_ind_pack_refl A eqdec B x p G _)
+  | @simplification_sigma2 ?A ?P ?B ?p ?x ?y ?X eq_refl=>
+    rewrite (@simplification_sigma2_refl A P B p x X); simpl
+  | @Id_simplification_sigma2 ?A ?H ?P ?B ?p ?x ?y ?X id_refl=>
+    rewrite (@Id_simplification_sigma2_refl A H P B p x X); simpl
+  | @simplification_sigma2_dec ?A ?H ?P ?B ?p ?x ?y ?X eq_refl=>
+    rewrite (@simplification_sigma2_dec_refl A H P B p x X); simpl
+  | @simplification_sigma2_dec_point ?A ?p ?H ?P ?B ?x ?y ?X eq_refl=>
+    rewrite (@simplification_sigma2_dec_point_refl A p H P B x X); simpl
+  | @simplification_K ?A ?x ?B ?p eq_refl=>
+    rewrite (@simplification_K_refl A x B p); simpl eq_rect
+  | @simplification_K_dec ?A ?dec ?x ?B ?p eq_refl=>
+    rewrite (@simplification_K_dec_refl A dec x B p); simpl eq_rect
+  | @HSets.inj_sigma_r ?A ?H ?P ?x ?y ?y' _=>
+    rewrite (@HSets.inj_sigma_r_refl A H P x y)
+
+  | @simplification_heq ?A ?B ?x _ ?p JMeq_refl=>
+    rewrite (@simplification_heq_refl A B x p)
+  | @simplification_existT2_dec ?A ?eq ?P ?B ?p ?x ?y ?X eq_refl=>
+    rewrite (@simplification_existT2_dec_refl A eq P B p x X); simpl
+  | @simplification_existT2 ?A ?P ?B ?p ?x ?y ?X eq_refl=>
+    rewrite (@simplification_existT2_refl A P B p x X); simpl
+  end.
+
+Ltac rewrite_sigma2_term x :=
+  match x with
+   | ?f _ _ _ _ _ _ _ _ _ => rewrite_sigma2_rule f
+   | ?f _ _ _ _ _ _ _ _ => rewrite_sigma2_rule f
+   | ?f _ _ _ _ _ _ _ => rewrite_sigma2_rule f
+   | ?f _ _ _ _ _ _ => rewrite_sigma2_rule f
+   | ?f _ _ _ _ _ => rewrite_sigma2_rule f
+   | ?f _ _ _ _ => rewrite_sigma2_rule f
+   | ?f _ _ _ => rewrite_sigma2_rule f
+   | ?f _ _ => rewrite_sigma2_rule f
+   | ?f _ => rewrite_sigma2_rule f
+   | ?f => rewrite_sigma2_rule f
+  end.
+
+Ltac rewrite_sigma2_refl_eq :=
+  match goal with
+    |- ?x = ?y => rewrite_sigma2_term x || rewrite_sigma2_term y
+  end.
+
+Ltac rewrite_sigma2_refl_goal :=
+  match goal with
+  | |- ?P ?x => rewrite_sigma2_term x
+  end.
+
+(* Ltac simpl_equations :=  *)
+(*   repeat (repeat (simpl; (hnf_eq || rewrite_sigma2_refl_eq || autorewrite with refl_id); simpl); *)
+(*           try progress autounfold with equations). *)
+
+(* Ltac simplify_equation c := *)
+(*   make_simplify_goal ; simpl ; *)
+(*   repeat (try autounfoldify c; *)
+(*           try (red_gl || rewrite_sigma2_refl_goal || autorewrite with refl_id) ; simpl). *)
+
 Ltac simpl_equations :=
   repeat (repeat (simpl; hnf_eq; rewrite_refl_id);
           try progress autounfold with equations).
@@ -1351,9 +1461,8 @@ Ltac simpl_equations :=
 Ltac simpl_equation_impl :=
   repeat (unfold_equations; rewrite_refl_id).
 
-
 Ltac simplify_equation c :=
-  make_simplify_goal; simpl; 
+  make_simplify_goal; simpl;
   repeat (try autounfoldify c; simpl;
           unfold_equations; rewrite_refl_id).
 
