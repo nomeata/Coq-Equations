@@ -1489,7 +1489,16 @@ let is_recursive i eqs =
     else Some false
   in occur_eqns eqs
 
-let define_by_eqs opts i l t nt eqs =
+type program_info = {
+  program_id : Id.t;
+  program_sign : rel_context;
+  program_arity : Constr.t;
+  program_oarity : Constr.t;
+  program_rec : Syntax.rec_type option;
+  program_impls : Impargs.manual_explicitation list;
+}
+
+let define_by_eqs opts eqs nt =
   let with_comp, with_rec, with_eqns, with_ind =
     let try_bool_opt opt =
       if List.mem opt opts then false
@@ -1506,13 +1515,13 @@ let define_by_eqs opts i l t nt eqs =
   let env = Global.env () in
   let poly = Flags.is_universe_polymorphism () in
   let evd = ref (Evd.from_env env) in
-  let ienv, ((env', sign), impls) = interp_context_evars env evd l in
-  let arity = interp_type_evars env' evd t in
-  let sign = nf_rel_context_evar ( !evd) sign in
-  let oarity = nf_evar ( !evd) arity in
-  let is_recursive = is_recursive i eqs in
-  let (sign, oarity, arity, comp, is_recursive) = 
-    let body = it_mkLambda_or_LetIn oarity sign in
+  let interp_arities (((loc,i),l,t),eqs) =
+    let ienv, ((env', sign), impls) = interp_context_evars env evd l in
+    let arity = interp_type_evars env' evd t in
+    let sign = nf_rel_context_evar ( !evd) sign in
+    let arity = nf_evar ( !evd) arity in
+    let is_recursive = is_recursive i eqs in
+    let body = it_mkLambda_or_LetIn arity sign in
     let _ = Pretyping.check_evars env Evd.empty !evd body in
     let comp, compapp, oarity =
       if with_comp then
@@ -1521,7 +1530,7 @@ let define_by_eqs opts i l t nt eqs =
 	let comp =
 	  Declare.declare_constant compid (DefinitionEntry ce, IsDefinition Definition)
 	in (*Typeclasses.add_constant_class c;*)
-        let oarity = nf_evar !evd oarity in
+        let oarity = nf_evar !evd arity in
         let sign = nf_rel_context_evar !evd sign in
 	evd := if poly then !evd else Evd.from_env (Global.env ());
 	let compc = e_new_global evd (ConstRef comp) in
@@ -1532,15 +1541,19 @@ let define_by_eqs opts i l t nt eqs =
         Impargs.declare_manual_implicits true (ConstRef comp) [impls];
         (* Table.extraction_inline true [Ident (dummy_loc, compid)]; *)
         Some (compid, comp), compapp, oarity
-      else
-        (* let compapp = mkApp (body, rel_vect 0 (length sign)) in *)
-        None, oarity, oarity
+      else None, arity, arity
     in
     match is_recursive with
-    | None -> (sign, oarity, oarity, None, None)
+    | None ->
+       { program_id = i;
+         program_sign = sign;
+         program_oarity = oarity;
+         program_arity = oarity;
+         program_rec = None;
+         program_impls = impls }
     | Some b ->
        let projid = add_suffix i "_comp_proj" in
-       let compproj = 
+       let compproj =
 	 let body =
            it_mkLambda_or_LetIn (mkRel 1)
 				(of_tuple (Name (id_of_string "comp"), None, compapp) :: sign)
@@ -1567,42 +1580,62 @@ let define_by_eqs opts i l t nt eqs =
 	 if b then compapp, Some (Logical compinfo)
 	 else compapp, Some (Structural with_rec)
        in
-       (sign, oarity, compapp, Some compinfo, is_recursive)
+       { program_id = i;
+         program_sign = sign;
+         program_oarity = oarity;
+         program_arity = compapp;
+         program_rec = is_recursive;
+         program_impls = impls }
   in
+  let arities = List.map interp_arities eqs in
+  let eqs = List.map snd eqs in
   let env = Global.env () in (* To find the comp constant *)
-  let oty = it_mkProd_or_LetIn oarity sign in
-  let ty = it_mkProd_or_LetIn arity sign in
-  let data = Constrintern.compute_internalization_env
-    env Constrintern.Recursive [i] [oty] [impls] 
+
+  let tys = List.map (fun p ->
+            let oty = it_mkProd_or_LetIn p.program_oarity p.program_sign in
+            let ty = it_mkProd_or_LetIn p.program_arity p.program_sign in
+            (p.program_id, (oty, ty), p.program_impls)) arities
   in
-  let fixprot = mkLetIn (Anonymous,
-                         Universes.constr_of_global (Lazy.force coq_fix_proto),
-			 Universes.constr_of_global (Lazy.force coq_unit), ty) in
-  let fixdecls = [of_tuple (Name i, None, fixprot)] in
-  let implsinfo = Impargs.compute_implicits_with_manual env oty false impls in
+  let names, otys, impls = List.split3 tys in
+  let data =
+    Constrintern.compute_internalization_env
+    env Constrintern.Recursive names (List.map fst otys) impls
+  in
+  let fixprots =
+    List.map (fun (oty, ty) ->
+    mkLetIn (Anonymous,
+             Universes.constr_of_global (Lazy.force coq_fix_proto),
+	     Universes.constr_of_global (Lazy.force coq_unit), ty)) otys in
+  let fixdecls =
+    List.map2 (fun i fixprot -> of_tuple (Name i, None, fixprot)) names fixprots in
+  let implsinfo = List.map (fun (_, (oty, ty), impls) ->
+                  Impargs.compute_implicits_with_manual env oty false impls) tys in
   let equations = 
     Metasyntax.with_syntax_protection (fun () ->
       List.iter (Metasyntax.set_notation_for_interpretation data) nt;
-      map (interp_eqn i is_recursive env implsinfo) eqs)
+      List.map3 (fun implsinfo ar eqs ->
+        map (interp_eqn ar.program_id ar.program_rec env implsinfo) eqs)
+        implsinfo arities eqs)
       ()
   in
-  let sign = nf_rel_context_evar !evd sign in
-  let oarity = nf_evar !evd oarity in
-  let arity = nf_evar !evd arity in
   let fixdecls = nf_rel_context_evar !evd fixdecls in
-  (*   let ce = check_evars fixenv Evd.empty !evd in *)
-  (*   List.iter (function (_, _, Program rhs) -> ce rhs | _ -> ()) equations; *)
-  let prob = 
-    if is_structural is_recursive then
-      id_subst (sign @ fixdecls)
-    else id_subst sign
-  in
-  let split = covering env evd (i,with_comp,data) equations [] prob arity in
+  let covering env p eqs =
+    let sign = nf_rel_context_evar !evd p.program_sign in
+    let prob =
+      if is_structural p.program_rec then
+        id_subst (sign @ fixdecls)
+      else id_subst sign
+    in
+    let _oarity = nf_evar !evd p.program_oarity in
+    let arity = nf_evar !evd p.program_arity in
+    covering env evd (p.program_id,with_comp,data) eqs [] prob arity in
+  let coverings = List.map2 (covering env) arities equations in
   let status = (* if is_recursive then Expand else *) Define false in
-  let baseid = string_of_id i in
   let (ids, csts) = full_transparent_state in
   let fix_proto_ref = destConstRef (Lazy.force coq_fix_proto) in
   let kind = (Decl_kinds.Global, poly, Decl_kinds.Definition) in
+  let baseid =
+    let p = List.hd arities in string_of_id p.program_id in
   let () =
     let trs = (ids, Cpred.remove fix_proto_ref csts) in
     Hints.create_hint_db false baseid trs true
@@ -1614,11 +1647,12 @@ let define_by_eqs opts i l t nt eqs =
     let env = Global.env () in
     let () = evd := Evd.from_ctx ectx in
     let split = map_evars_in_split !evd cmap split in
-    let sign = nf_rel_context_evar !evd sign in
-    let oarity = nf_evar !evd oarity in
-    let arity = nf_evar !evd arity in
-    let fixprot = nf_evar !evd fixprot in
-    let f =
+    let hook_one p =
+      let sign = nf_rel_context_evar !evd p.program_sign in
+      let oarity = nf_evar !evd p.program_oarity in
+      let arity = nf_evar !evd p.program_arity in
+      let fixprot = nf_evar !evd fixprots in
+      let f =
       let (f, uc) = Universes.unsafe_constr_of_global gr in
         evd := Evd.from_env env;
 	if poly then
@@ -1694,15 +1728,24 @@ let define_by_eqs opts i l t nt eqs =
 	      define_tree None poly impls status evd env
 			  (unfoldi, sign, oarity) None unfold_split hook_unfold
       else ()
-  in define_tree is_recursive poly impls status evd env (i, sign, oarity)
-		 comp split hook
+  in
+  let define_tree p split =
+    let comp = match p.program_rec with
+      Some (Logical l) -> Some l
+    | _ -> None
+    in
+    define_tree p.program_rec poly p.program_impls status evd env
+                (p.program_id, p.program_sign, p.program_oarity)
+		comp split hook
+  in List.iter2 define_tree arities coverings
+
 
 let with_rollback f x =
   States.with_state_protection_on_exception f x
 
-let equations opts (loc, i) l t nt eqs =
-  Dumpglob.dump_definition (loc, i) false "def";
-  define_by_eqs opts i l t nt eqs
+let equations opts eqs nt =
+  List.iter (fun (((loc, i), l, t),eqs) -> Dumpglob.dump_definition (loc, i) false "def") eqs;
+  define_by_eqs opts eqs nt
 
 let solve_equations_goal destruct_tac tac gl =
   let concl = pf_concl gl in

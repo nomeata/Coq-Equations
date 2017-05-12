@@ -64,7 +64,7 @@ type user_pats = user_pat list
 
 (** AST *)
 type program = 
-  signature * clause list
+  (signature * clause list) list
 
 and signature = identifier * rel_context * constr
   
@@ -145,6 +145,8 @@ type input_pats =
 
 type pre_equation = 
   identifier located option * input_pats * pre_equation rhs
+
+type pre_equations = pre_equation where_clause list
 
 let next_ident_away s ids =
   let n' = Namegen.next_ident_away s !ids in

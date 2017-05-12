@@ -34,7 +34,7 @@ and 'a rhs =
 and prototype =
   identifier located * Constrexpr.local_binder list * Constrexpr.constr_expr
 and 'a where_clause = prototype * 'a list
-and program = signature * clause list
+and program = (signature * clause list) list
 and signature = identifier * rel_context * constr (* f : Π Δ. τ *)
 and clause = lhs * clause rhs (* lhs rhs *)
 
@@ -64,6 +64,7 @@ type input_pats =
   | RefinePats of user_pat_expr list
 type pre_equation =
     identifier located option * input_pats * pre_equation rhs
+type pre_equations = pre_equation where_clause list
 
 
 type rec_type = 

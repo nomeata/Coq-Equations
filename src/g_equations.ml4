@@ -340,6 +340,21 @@ let deppat_equations : Syntax.pre_equation list Gram.entry =
 let _ = Pptactic.declare_extra_genarg_pprule wit_deppat_equations
   pr_raw_deppat_equations pr_glob_deppat_equations pr_deppat_equations
 
+type equations_argtype = pre_equations Genarg.uniform_genarg_type
+
+let wit_equations : equations_argtype =
+  Genarg.create_arg "equations"
+
+let pr_raw_equations _ _ _ l = mt ()
+let pr_glob_equations _ _ _ l = mt ()
+let pr_equations _ _ _ l = mt ()
+
+let equations : pre_equation where_clause list Gram.entry =
+  Pcoq.create_generic_entry Pcoq.uvernac "equations" (Genarg.rawwit wit_equations)
+
+let _ = Pptactic.declare_extra_genarg_pprule wit_equations
+  pr_raw_equations pr_glob_equations pr_equations
+
 open Glob_term
 open Util
 open Pcoq
@@ -352,7 +367,7 @@ open Tok
 open Syntax
 
 GEXTEND Gram
-  GLOBAL: pattern deppat_equations binders2 lident;
+  GLOBAL: pattern deppat_equations binders2 equations lident;
  
   binders2 : 
      [ [ b = binders -> b ] ]
@@ -412,26 +427,28 @@ GEXTEND Gram
   rhs:
     [ [ ":=!"; id = identref -> Empty id
       | [":="|"=>"]; c = Constr.lconstr; w = where -> Program (c, w)
-      | ["with"|"<="]; ref = refine; [":="|"=>"]; e = equations -> ref e
-      | "<-"; "(" ; t = Tactic.tactic; ")"; e = equations -> By (Inl t, e)
+      | ["with"|"<="]; ref = refine; [":="|"=>"]; e = sub_equations -> ref e
+      | "<-"; "(" ; t = Tactic.tactic; ")"; e = sub_equations -> By (Inl t, e)
       | "by"; IDENT "rec"; c = constr; rel = OPT constr; id = OPT identref;
         [":="|"=>"]; e = deppat_equations -> Rec (c, rel, id, e)
     ] ]
   ;
 
-  equations:
+  sub_equations:
     [ [ "{"; l = deppat_equations; "}" -> l 
       | l = deppat_equations -> l
     ] ]
   ;
 
+  equations:
+  [ [ l = LIST1 where_clause -> l ] ]
+  ;
   END
 
 VERNAC COMMAND EXTEND Define_equations CLASSIFIED AS SIDEFF
-| [ "Equations" equation_options(opt) lident(i) binders2(l) 
-      ":" lconstr(t) ":=" deppat_equations(eqs)
+| [ "Equations" equation_options(opt) equations(eqns)
       (* decl_notation(nt) *) ] ->
-    [ Equations.equations opt i l t [] eqs ]
+    [ Equations.equations opt eqns ]
       END
 
 (* TACTIC EXTEND block_goal *)
