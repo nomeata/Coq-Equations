@@ -450,8 +450,8 @@ GEXTEND Gram
     ] ]
   ;
   where_clause:
-    [ [ id = lident; l = binders2; ":"; t = Constr.lconstr;
-        ":="; eqs = sub_equations -> ((id, l, t), eqs) ] ]
+    [ [ nested = [ IDENT "Nested" -> true | -> false ]; id = lident; l = binders2; ":"; t = Constr.lconstr;
+        ":="; eqs = sub_equations -> ((id, nested, l, t), eqs) ] ]
   ;
   where:
     [ [ "where"; l = LIST1 where_clause -> l

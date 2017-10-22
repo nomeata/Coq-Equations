@@ -14,6 +14,7 @@ open Equations_common
 
 (** User-level patterns *)
 type generated = bool
+type nested = bool
 
 type user_pat =
     PUVar of identifier * generated
@@ -34,7 +35,7 @@ and 'a rhs =
   | By of (Tacexpr.raw_tactic_expr, Tacexpr.glob_tactic_expr) Util.union *
       'a list
 and prototype =
-  identifier located * Constrexpr.local_binder list * Constrexpr.constr_expr
+  identifier located * nested * Constrexpr.local_binder list * Constrexpr.constr_expr
 and 'a where_clause = prototype * 'a list
 and program = (signature * clause list) list
 and signature = identifier * rel_context * constr (* f : Π Δ. τ *)
@@ -68,9 +69,8 @@ type pre_equation =
     identifier located option * input_pats * pre_equation rhs
 type pre_equations = pre_equation where_clause list
 
-
 type rec_type = 
-  | Structural of (Id.t * Id.t located option) list (* for mutual rec *)
+  | Structural of (Id.t * nested * Id.t located option) list (* for mutual rec *)
   | Logical of logical_rec
 and logical_rec =
   | LogicalDirect of Id.t located

@@ -63,6 +63,8 @@ type user_pat =
 and user_pats = user_pat Loc.located list
 
 (** AST *)
+type nested = bool
+              
 type program = 
   (signature * clause list) list
 
@@ -81,7 +83,7 @@ and 'a rhs =
   | By of (Tacexpr.raw_tactic_expr, Tacexpr.glob_tactic_expr) union * 'a list
 
 and prototype =
-  identifier located * Constrexpr.local_binder list * Constrexpr.constr_expr
+  identifier located * nested * Constrexpr.local_binder list * Constrexpr.constr_expr
 
 and 'a where_clause = prototype * 'a list
 
@@ -121,7 +123,7 @@ and pr_wheres env l =
   prlist_with_sep fnl (pr_where env) l
 and pr_where env (sign, eqns) =
   pr_proto sign ++ pr_clauses env eqns
-and pr_proto ((_,id), l, t) =
+and pr_proto ((_,id), _, l, t) =
   pr_id id ++ pr_binders l ++ str" : " ++ pr_constr_expr t
 and pr_clause env (loc, lhs, rhs) =
   pr_lhs env lhs ++ pr_rhs env rhs
@@ -153,7 +155,7 @@ let next_ident_away s ids =
   let n' = Namegen.next_ident_away s !ids in
     ids := n' :: !ids; n'
 
-type equation_option = | OInd of bool | ORec of Id.t located option 
+type equation_option = | OInd of bool | ORec of Id.t located option
 		       | OComp of bool | OEquations of bool
     
 type equation_user_option = equation_option
@@ -167,7 +169,7 @@ let pr_equation_options  _prc _prlc _prt l =
   mt ()
 
 type rec_type = 
-  | Structural of (Id.t * Id.t located option) list (* for mutual rec *)
+  | Structural of (Id.t * nested * Id.t located option) list (* for mutual rec *)
   | Logical of logical_rec
 
 and logical_rec =
@@ -320,7 +322,7 @@ let interp_eqn i is_rec env impls eqn =
       match is_rec with
       | Some (Structural l) ->
          (* let fnpat = (dummy_loc, PUVar (i, false)) in *)
-         let structpats = List.map (fun (id,_) -> (dummy_loc, PUVar (id, false))) l in
+         let structpats = List.map (fun (id,_,_) -> (dummy_loc, PUVar (id, false))) l in
          (loc, structpats @ pats,
           interp_rhs recinfo i is_rec curpats' rhs)
       | Some (Logical r) -> 
@@ -339,7 +341,7 @@ let interp_eqn i is_rec env impls eqn =
       Rec (fni, r, id, map (aux recinfo i is_rec curpats) s)
     | By (x, s) -> By (x, map (aux recinfo i is_rec curpats) s)
   and interp_wheres recinfo avoid w =
-    let interp_where (((loc,id),b,t) as p,eqns) =
+    let interp_where (((loc,id),nested,b,t) as p,eqns) =
       Dumpglob.dump_reference loc "<>" (string_of_id id) "def";
       p, map (aux recinfo id None []) eqns
     in List.map interp_where w
